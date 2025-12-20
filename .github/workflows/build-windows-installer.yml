@@ -57,9 +57,15 @@ jobs:
       - name: Install Inno Setup
         run: choco install innosetup --no-progress
 
-      - name: Build installer
+      - name: Debug Inno Setup path
+        shell: cmd
         run: |
-          "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\bdc_generator.iss
+          where ISCC
+          dir "C:\Program Files (x86)\Inno Setup 6\"
+
+      - name: Build installer
+        shell: cmd
+        run: "\"C:\\Program Files (x86)\\Inno Setup 6\\ISCC.exe\" installer\\bdc_generator.iss"
 
       - name: Create release zip
         shell: bash
