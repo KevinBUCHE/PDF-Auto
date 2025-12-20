@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -65,7 +66,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(900, 600)
 
         self.devis_items = {}
-        self.parser = DevisParser()
+        self.parser = DevisParser(debug=bool(os.getenv("BDC_DEBUG")))
         self.pose_detector = PoseDetector()
         self.bdc_filler = BdcFiller()
 
@@ -114,6 +115,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.add_row(path, pose_sold)
                 self.devis_items[path] = DevisItem(path=path, data=data, pose_sold=pose_sold)
                 self.log(f"Ajouté: {path.name} (pose: {'oui' if pose_sold else 'non'})")
+                for entry in data.get("debug", []):
+                    self.log(f"[debug] {path.name}: {entry}")
             except Exception as exc:  # pylint: disable=broad-except
                 self.log(f"Erreur lecture {path.name}: {exc}")
 
@@ -162,13 +165,25 @@ class MainWindow(QtWidgets.QMainWindow):
             item.pose_sold = pose_sold
             item.data["pose_sold"] = pose_sold
             try:
-                output_path = output_dir / f"BDC_{path.stem}.pdf"
+                output_name = self._build_output_name(item.data)
+                output_path = output_dir / output_name
                 self.bdc_filler.fill(template_path, item.data, output_path)
                 status_item.setText(f"OK -> {output_path}")
                 self.log(f"BDC généré: {output_path}")
             except Exception as exc:  # pylint: disable=broad-except
                 status_item.setText("Erreur")
                 self.log(f"Erreur génération {path.name}: {exc}")
+
+    def _build_output_name(self, data: dict) -> str:
+        client_nom = data.get("client_nom", "").strip() or "CLIENT"
+        ref_affaire = data.get("ref_affaire", "").strip() or "Ref INCONNUE"
+        base = f"CDE {client_nom} Ref {ref_affaire}"
+        base = re.sub(r'[\\/:*?"<>|]', " ", base)
+        base = re.sub(r"\s+", " ", base).strip()
+        max_base = 150 - len(".pdf")
+        if len(base) > max_base:
+            base = base[:max_base].rstrip()
+        return f"{base}.pdf"
 
 
 def main():
