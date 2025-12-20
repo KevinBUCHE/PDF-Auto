@@ -12,11 +12,30 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Debug repository contents
+        shell: bash
+        run: |
+          echo "Repository root contents:"
+          ls -la
+          echo "Templates directory contents:"
+          if [ -d "Templates" ]; then
+            ls -la "Templates"
+          else
+            echo "Templates directory not found."
+          fi
+
       - name: Validate template exists
         shell: bash
         run: |
           if [ ! -f "Templates/bon de commande V1.pdf" ]; then
-            echo "Missing required template: Templates/bon de commande V1.pdf"
+            echo "Missing required template."
+            echo "Expected path: Templates/bon de commande V1.pdf"
+            echo "Templates directory contents:"
+            if [ -d "Templates" ]; then
+              ls -la "Templates"
+            else
+              echo "Templates directory not found."
+            fi
             exit 1
           fi
 
