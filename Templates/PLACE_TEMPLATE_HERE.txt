@@ -1,0 +1,4 @@
+Placez ici le template PDF nommé exactement :
+Templates/bon de commande V1.pdf
+
+Le workflow GitHub Actions échouera tant que ce fichier n'est pas présent.
