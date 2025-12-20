@@ -1,0 +1,58 @@
+name: Build Windows Installer
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate template exists
+        shell: bash
+        run: |
+          if [ ! -f "Templates/bon de commande V1.pdf" ]; then
+            echo "Missing required template: Templates/bon de commande V1.pdf"
+            exit 1
+          fi
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build portable app
+        run: |
+          pyinstaller --onedir --windowed --name "BDC Generator" --add-data "Templates;Templates" main.py
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress
+
+      - name: Build installer
+        run: |
+          "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\bdc_generator.iss
+
+      - name: Create release zip
+        shell: bash
+        run: |
+          mkdir -p release_zip
+          cp dist_installer/BDC_Generator_Setup_User.exe release_zip/
+          cp README_Installation.txt release_zip/
+          cd release_zip
+          7z a ../BDC_Generator.zip *
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BDC_Generator
+          path: BDC_Generator.zip
