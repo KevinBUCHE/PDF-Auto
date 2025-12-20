@@ -29,19 +29,45 @@
 5. Les BDC sont générés dans `BDC_Output/`.
 
 ## 3. Règles métier appliquées
+### Template PDF
+- Template requis : `Templates/bon de commande V1.pdf`
+- `NeedAppearances` activé (Adobe Reader)
+- **Ne jamais aplatir** le PDF (formulaire éditable)
+
+### Numéro de devis (SRX)
+- Extraction `SRX(yymm)AFF(num)`
+- Remplissage:
+  - `bdc_devis_annee_mois = yymm`
+  - `bdc_devis_type = AFF`
+  - `bdc_devis_num = num` (6 chiffres)
+
+### Date
+- `bdc_date_commande` = date du jour (pas la date du devis)
+
+### Référence affaire
+- `bdc_ref_affaire` = dernière ligne non vide juste avant la date du devis
+
+### Client
+- Bloc client entre `Code client : ...` et `Contact commercial :`
+- `bdc_client_nom` = première ligne non numérique du bloc
+- `bdc_client_adresse` = lignes suivantes (multi-lignes OK)
+
+### Commercial
+- `bdc_commercial_nom = "BUCHE Kevin"`
+
 ### Détection de pose
 - Détecter la pose vendue **uniquement** si une ligne contient `Pose au ...` avec un montant.
 
 ### Si pose vendue
 - `bdc_livraison_bloc` vide
-- checkbox livraison poseur cochée
-- checkbox livraison client décochée
+- checkbox `bdc_chk_livraison_poseur` cochée
+- checkbox `bdc_chk_livraison_client` décochée
 - `bdc_montant_pose_ht` = montant `Pose au ...` si trouvé, sinon `prestations_ht`
 
 ### Si pas de pose
 - `bdc_livraison_bloc` = "idem"
-- checkbox livraison client cochée
-- checkbox livraison poseur décochée
+- checkbox `bdc_chk_livraison_client` cochée
+- checkbox `bdc_chk_livraison_poseur` décochée
 - `bdc_montant_pose_ht` = `prestations_ht`
 
 ### Montants extraits
@@ -49,17 +75,29 @@
   - `PRIX DE LA FOURNITURE HT`
   - `PRIX PRESTATIONS ET SERVICES HT`
   - `TOTAL HORS TAXE`
-
-### Référence devis
-- Extraction `SRX(yymm)AFF(num)`
 - Remplissage:
-  - `bdc_devis_annee_mois = yymm`
-  - `bdc_devis_num = num` (6 chiffres)
-  - `bdc_devis_type = AFF`
+  - `bdc_montant_fourniture_ht = fourniture_ht`
+  - `bdc_total_ht = total_ht`
 
-### PDF
-- **Ne jamais aplatir** le PDF
-- `NeedAppearances` activé
+### Champs techniques
+- `bdc_esc_gamme` = valeur de `-Modèle : ...`
+- `bdc_esc_finition_marches` = valeur de `-Marche : ...`
+- `bdc_esc_essence` = texte avant le premier `-` dans la finition marche
+
+### Poteau / TPA
+- Si ligne `-Poteau ... (TPA)` :
+  - `bdc_esc_tete_de_poteau = "TPA"`
+- `bdc_esc_poteaux_depart` vide si poteau standard (`Poteau droit ...`)
+
+### Nom des fichiers BDC
+- Format : `CDE {NOM_CLIENT} Ref {REF_AFFAIRE}.pdf`
+- Remplacement des caractères interdits Windows `\ / : * ? " < > |`
+- Normalisation des espaces
+- Longueur totale max : 150 caractères
+- Si ref affaire vide : `Ref INCONNUE`
+
+### Debug
+- Variable d'environnement `BDC_DEBUG=1` pour tracer les valeurs extraites dans l'UI
 
 ## 4. Packaging
 ### Commandes locales
