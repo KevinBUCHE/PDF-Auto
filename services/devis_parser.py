@@ -230,8 +230,8 @@ class DevisParser:
                 if not value:
                     return ""
                 if value.lower().startswith("réf affaire"):
-                    return value
-                return f"Réf affaire : {value}"
+                    value = value.split(":", 1)[-1].strip()
+                return value
         return ""
 
     def _find_client_details(self, lines):
@@ -257,7 +257,11 @@ class DevisParser:
             if not candidate:
                 continue
             lowered = candidate.lower()
-            if lowered.startswith("date du devis") or lowered.startswith("réf affaire"):
+            if (
+                lowered.startswith("date du devis")
+                or lowered.startswith("réf affaire")
+                or "devis" in lowered
+            ):
                 continue
             client_nom = candidate
             break
@@ -271,6 +275,10 @@ class DevisParser:
                 break
             if "contact commercial" in lowered:
                 break
+            if self._is_legal_noise(line):
+                continue
+            if "vaugarny" in lowered:
+                continue
             address_lines.append(line)
         contact, address_lines = self._extract_contact(address_lines)
         adresse1, adresse2, cp, ville = self._split_address_lines(address_lines)
@@ -287,6 +295,19 @@ class DevisParser:
             "contact": contact,
         }
 
+    def _is_legal_noise(self, line: str) -> bool:
+        lowered = line.lower()
+        keywords = (
+            "sas",
+            "sarl",
+            "rcs",
+            "naf",
+            "siret",
+            "capital",
+            "eur",
+        )
+        return any(keyword in lowered for keyword in keywords)
+
     def _extract_contact(self, lines):
         filtered = []
         contact = ""
@@ -302,29 +323,64 @@ class DevisParser:
         cp = ""
         ville = ""
         remaining = []
-        for line in address_lines:
+        cp_candidates = []
+        for idx, line in enumerate(address_lines):
             match = CP_VILLE_RE.search(line)
             if match:
-                cp = match.group(1)
-                ville = match.group(2).strip()
-                prefix = line[: match.start()].strip()
-                if prefix:
-                    remaining.append(prefix)
-            else:
-                remaining.append(line)
+                cp_candidates.append(
+                    {
+                        "cp": match.group(1),
+                        "ville": match.group(2).strip(),
+                        "prefix": line[: match.start()].strip(),
+                        "prev_line": address_lines[idx - 1].strip() if idx > 0 else "",
+                        "index": idx,
+                    }
+                )
+                continue
+            remaining.append(line)
+        if cp_candidates:
+            cp_choice = self._choose_cp_ville(cp_candidates)
+            cp = cp_choice["cp"]
+            ville = cp_choice["ville"]
+            candidate_by_index = {candidate["index"]: candidate for candidate in cp_candidates}
+            rebuilt = []
+            for idx, line in enumerate(address_lines):
+                candidate = candidate_by_index.get(idx)
+                if candidate:
+                    if candidate["prefix"]:
+                        rebuilt.append(candidate["prefix"])
+                    continue
+                rebuilt.append(line)
+            remaining = rebuilt
         adresse1 = remaining[0] if remaining else ""
         adresse2 = " ".join(remaining[1:]) if len(remaining) > 1 else ""
         return adresse1, adresse2, cp, ville
+
+    def _choose_cp_ville(self, candidates):
+        for candidate in candidates:
+            if re.search(r"\d+\s+.+", candidate["prev_line"]):
+                return candidate
+        return candidates[-1]
 
     def _find_commercial_details(self, lines):
         for idx, line in enumerate(lines):
             lowered = line.lower()
             if "contact commercial" in lowered:
                 name = ""
+                match = re.search(r"contact commercial\s*:\s*(.+)", line, re.IGNORECASE)
+                if match:
+                    name = match.group(1).strip()
                 for prev in range(idx - 1, -1, -1):
-                    if lines[prev].strip():
-                        name = lines[prev].strip()
-                        break
+                    previous = lines[prev].strip()
+                    if not previous:
+                        continue
+                    if "contact commercial" in previous.lower():
+                        continue
+                    if not name:
+                        name = previous
+                    break
+                if name.lower().startswith("contact commercial"):
+                    name = ""
                 search_start = max(idx - 2, 0)
                 search_lines = lines[search_start : idx + 3]
                 return {
@@ -435,7 +491,7 @@ class DevisParser:
                     value = match.group(1).strip()
                     value = re.sub(r"\([^)]*\)", "", value).strip()
                     return value
-        return ""
+        return "" 
 
     def _find_pose_details(self, lines):
         pose_amount = ""
@@ -445,7 +501,27 @@ class DevisParser:
             if "PRESTATIONS" in line.upper():
                 saw_prestations = True
                 continue
-            if saw_prestations and re.search(r"\bpose\b", line, re.IGNORECASE):
-                pose_sold = True
-                break
+            if not saw_prestations:
+                continue
+            if re.search(r"\bpose\b", line, re.IGNORECASE):
+                amount = self._extract_pose_amount(line)
+                if amount:
+                    pose_sold = True
+                    pose_amount = amount
+                    break
         return pose_sold, pose_amount
+
+    def _extract_pose_amount(self, line: str) -> str:
+        euro_matches = re.findall(
+            r"([0-9][0-9\s\u202f]*[\.,][0-9]{2})\s*€", line
+        )
+        if euro_matches:
+            return self._normalize_amount(euro_matches[-1])
+        matches = AMOUNT_RE.findall(line)
+        if not matches:
+            return ""
+        for match in reversed(matches):
+            normalized = self._normalize_amount(match)
+            if normalized not in {"1,00", "1.00"}:
+                return normalized
+        return ""
