@@ -1,30 +1,61 @@
 from pathlib import Path
 from datetime import date
 import logging
+from typing import Callable, Optional
 
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import BooleanObject, NameObject, TextStringObject
 
 
+WHITELIST_FIELDS = {
+    "bdc_client_adresse1",
+    "bdc_client_adresse2",
+    "bdc_client_cp",
+    "bdc_client_ville",
+    "bdc_client_tel",
+    "bdc_client_email",
+    "bdc_client_contact",
+    "bdc_commercial_nom",
+    "bdc_commercial_tel",
+    "bdc_commercial_email",
+    "bdc_date_commande",
+    "bdc_ref_affaire",
+    "bdc_devis_annee_mois",
+    "bdc_devis_type",
+    "bdc_devis_num",
+    "bdc_montant_fourniture_ht",
+    "bdc_montant_pose_ht",
+    "bdc_total_ht",
+    "bdc_livraison_bloc",
+    "bdc_chk_livraison_poseur",
+    "bdc_chk_livraison_client",
+    "bdc_esc_gamme",
+    "bdc_esc_finition_marches",
+    "bdc_esc_essence",
+    "bdc_esc_tete_de_poteau",
+    "bdc_esc_poteaux_depart",
+}
+
+CRITICAL_FIELDS = {
+    "bdc_devis_annee_mois",
+    "bdc_devis_type",
+    "bdc_devis_num",
+}
+
+
 class BdcFiller:
+    def __init__(self, logger: Optional[Callable[[str], None]] = None):
+        self._logger = logger
+
     def fill(self, template_path: Path, data: dict, output_path: Path):
         if not template_path.exists():
             raise FileNotFoundError(template_path)
         reader = PdfReader(str(template_path))
         acroform, field_map = self._extract_fields(reader)
         acroform_fields = acroform.get("/Fields") if acroform else None
-        logger = logging.getLogger(__name__)
-        logger.info(
-            "BDC template loaded: pages=%s acroform=%s fields_present=%s",
-            len(reader.pages),
-            bool(acroform),
-            bool(acroform_fields),
-        )
-        logger.info(
-            "BDC template fields (fallback): count=%s sample=%s",
-            len(field_map),
-            list(field_map.keys())[:10],
-        )
+        self._log(f"Template utilisé: {template_path}")
+        self._log(f"Champs trouvés via AcroForm: {len(field_map)}")
+        self._log(f"Champs (sample 10): {list(field_map.keys())[:10]}")
         if not acroform or not acroform_fields:
             raise ValueError(
                 "Template PDF is missing /AcroForm or /Fields; cannot fill form fields."
@@ -36,19 +67,56 @@ class BdcFiller:
         acroform.update({NameObject("/NeedAppearances"): BooleanObject(True)})
         writer._root_object.update({NameObject("/AcroForm"): acroform})
 
-        fields = {
-            "bdc_devis_annee_mois": data.get("devis_annee_mois", ""),
-            "bdc_devis_num": data.get("devis_num", ""),
-            "bdc_devis_type": data.get("devis_type", ""),
+        fields = self._build_fields(data)
+        checkbox_states = self._build_checkbox_states(data)
+
+        missing_critical = []
+        for name in WHITELIST_FIELDS:
+            if name not in field_map:
+                self._log(f"Champ manquant: {name}")
+                if name in CRITICAL_FIELDS:
+                    missing_critical.append(name)
+        if missing_critical:
+            raise ValueError(
+                f"Champs critiques manquants dans le template: {', '.join(missing_critical)}"
+            )
+
+        self._apply_text_fields(field_map, fields)
+        self._apply_checkboxes(field_map, checkbox_states)
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "wb") as output_file:
+            writer.write(output_file)
+
+    def _log(self, message: str):
+        if callable(self._logger):
+            self._logger(message)
+        else:
+            logging.getLogger(__name__).info(message)
+
+    def _build_fields(self, data: dict):
+        pose_sold = bool(data.get("pose_sold"))
+        livraison_bloc = "" if pose_sold else "idem"
+        return {
+            "bdc_client_adresse1": data.get("client_adresse1", ""),
+            "bdc_client_adresse2": data.get("client_adresse2", ""),
+            "bdc_client_cp": data.get("client_cp", ""),
+            "bdc_client_ville": data.get("client_ville", ""),
+            "bdc_client_tel": data.get("client_tel", ""),
+            "bdc_client_email": data.get("client_email", ""),
+            "bdc_client_contact": data.get("client_contact", ""),
+            "bdc_commercial_nom": data.get("commercial_nom", ""),
+            "bdc_commercial_tel": data.get("commercial_tel", ""),
+            "bdc_commercial_email": data.get("commercial_email", ""),
             "bdc_date_commande": date.today().strftime("%d/%m/%Y"),
             "bdc_ref_affaire": data.get("ref_affaire", ""),
-            "bdc_client_nom": data.get("client_nom", ""),
-            "bdc_client_adresse": data.get("client_adresse", ""),
-            "bdc_commercial_nom": "BUCHE Kevin",
-            "bdc_livraison_bloc": "idem" if not data.get("pose_sold") else "",
-            "bdc_montant_pose_ht": self._pose_amount(data),
+            "bdc_devis_annee_mois": data.get("devis_annee_mois", ""),
+            "bdc_devis_type": data.get("devis_type", ""),
+            "bdc_devis_num": data.get("devis_num", ""),
             "bdc_montant_fourniture_ht": data.get("fourniture_ht", ""),
+            "bdc_montant_pose_ht": self._pose_amount(data),
             "bdc_total_ht": data.get("total_ht", ""),
+            "bdc_livraison_bloc": livraison_bloc,
             "bdc_esc_gamme": data.get("esc_gamme", ""),
             "bdc_esc_finition_marches": data.get("esc_finition_marches", ""),
             "bdc_esc_essence": data.get("esc_essence", ""),
@@ -56,19 +124,12 @@ class BdcFiller:
             "bdc_esc_poteaux_depart": data.get("esc_poteaux_depart", ""),
         }
 
-        checkbox_states = {
-            "bdc_chk_livraison_client": not data.get("pose_sold"),
-            "bdc_chk_livraison_poseur": bool(data.get("pose_sold")),
+    def _build_checkbox_states(self, data: dict):
+        pose_sold = bool(data.get("pose_sold"))
+        return {
+            "bdc_chk_livraison_client": not pose_sold,
+            "bdc_chk_livraison_poseur": pose_sold,
         }
-
-        for page in writer.pages:
-            writer.update_page_form_field_values(page, fields)
-        self._apply_text_fields(field_map, fields)
-        self._apply_checkboxes(field_map, checkbox_states)
-
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, "wb") as output_file:
-            writer.write(output_file)
 
     def _pose_amount(self, data: dict) -> str:
         if data.get("pose_sold"):
@@ -82,9 +143,7 @@ class BdcFiller:
                 continue
             field = entry["field"]
             text_value = TextStringObject("" if value is None else str(value))
-            field.update({NameObject("/V"): text_value, NameObject("/DV"): text_value})
-            for kid in field.get("/Kids", []):
-                kid.update({NameObject("/V"): text_value, NameObject("/DV"): text_value})
+            field.update({NameObject("/V"): text_value})
 
     def _apply_checkboxes(self, field_map: dict, checkbox_states: dict):
         for name, state in checkbox_states.items():

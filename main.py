@@ -79,7 +79,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.devis_items = {}
         self.parser = DevisParser(debug=bool(os.getenv("BDC_DEBUG")))
         self.pose_detector = PoseDetector()
-        self.bdc_filler = BdcFiller()
+        self.bdc_filler = BdcFiller(logger=self.log)
         self.base_dir = self._resolve_base_dir()
         self.templates_dir = get_user_templates_dir(APP_NAME)
         self.template_path = get_template_path(APP_NAME)
