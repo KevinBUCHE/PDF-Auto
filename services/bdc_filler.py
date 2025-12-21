@@ -1,5 +1,6 @@
 from pathlib import Path
 from datetime import date
+import logging
 
 from pypdf import PdfReader, PdfWriter
 
@@ -9,16 +10,28 @@ class BdcFiller:
         if not template_path.exists():
             raise FileNotFoundError(template_path)
         reader = PdfReader(str(template_path))
+        fields_dict = reader.get_fields() or {}
+        root = reader.trailer.get("/Root", {})
+        acroform = root.get("/AcroForm")
+        acroform_fields = acroform.get("/Fields") if acroform else None
+        logger = logging.getLogger(__name__)
+        logger.info(
+            "BDC template loaded: pages=%s fields=%s acroform=%s fields_present=%s",
+            len(reader.pages),
+            len(fields_dict),
+            bool(acroform),
+            bool(acroform_fields),
+        )
+        if not acroform or not acroform_fields:
+            raise ValueError(
+                "Template PDF is missing /AcroForm or /Fields; cannot fill form fields."
+            )
         writer = PdfWriter()
         for page in reader.pages:
             writer.add_page(page)
 
-        if "/AcroForm" in reader.trailer.get("/Root", {}):
-            acroform = reader.trailer["/Root"]["/AcroForm"]
-            acroform.update({"/NeedAppearances": True})
-            writer._root_object.update({"/AcroForm": acroform})
-        else:
-            writer._root_object.update({"/AcroForm": {"/NeedAppearances": True}})
+        acroform.update({"/NeedAppearances": True})
+        writer._root_object.update({"/AcroForm": acroform})
 
         fields = {
             "bdc_devis_annee_mois": data.get("devis_annee_mois", ""),
