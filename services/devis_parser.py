@@ -5,8 +5,8 @@ import pdfplumber
 
 
 AMOUNT_RE = re.compile(r"([0-9][0-9\s\u202f]*[\.,][0-9]{2})")
-SRX_RE = re.compile(r"SRX(\d{4})AFF(\d{1,6})")
-DATE_RE = re.compile(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b")
+EURO_AMOUNT_RE = re.compile(r"(\d[\d\s]*,\d{2})\s*€")
+SRX_RE = re.compile(r"SRX(?P<yymm>\d{4})(?P<type>[A-Z]{3})(?P<num>\d{6})")
 LETTER_RE = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿ]")
 EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 PHONE_RE = re.compile(r"\b(?:\+33|0)\s?\d(?:[\s.-]?\d{2}){4}\b")
@@ -24,11 +24,15 @@ class DevisParser:
         if not lines:
             parse_warning = "Texte du devis illisible ou vide."
 
-        fourniture_ht = self._find_amount_before(lines, "PRIX DE LA FOURNITURE HT")
-        prestations_ht = self._find_amount_before(
-            lines, "PRIX PRESTATIONS ET SERVICES HT"
+        fourniture_ht = self._find_amount_by_label(
+            lines, r"PRIX DE LA FOURNITURE HT\s*:\s*([\d\s]+,\d{2})"
         )
-        total_ht = self._find_amount_before(lines, "TOTAL HORS TAXE")
+        prestations_ht = self._find_amount_by_label(
+            lines, r"PRIX PRESTATIONS ET SERVICES HT\s*:\s*([\d\s]+,\d{2})"
+        )
+        total_ht = self._find_amount_by_label(
+            lines, r"TOTAL HORS TAXE\s*:\s*([\d\s]+,\d{2})"
+        )
 
         devis_match = self._find_devis_reference(lines)
         devis_annee_mois = devis_match[0] if devis_match else ""
@@ -43,6 +47,7 @@ class DevisParser:
         esc_essence = self._extract_essence(esc_finition_marches)
         esc_tete_de_poteau = self._find_tete_poteau(lines)
         esc_poteaux_depart = self._find_poteaux_depart(lines)
+        pose_sold, pose_amount = self._find_pose_details(lines)
 
         data = {
             "lines": lines,
@@ -69,6 +74,8 @@ class DevisParser:
             "esc_essence": esc_essence,
             "esc_tete_de_poteau": esc_tete_de_poteau,
             "esc_poteaux_depart": esc_poteaux_depart,
+            "pose_sold": pose_sold,
+            "pose_amount": pose_amount,
             "parse_warning": parse_warning,
         }
         if self.debug:
@@ -91,6 +98,8 @@ class DevisParser:
                 f"fourniture_ht={fourniture_ht}",
                 f"prestations_ht={prestations_ht}",
                 f"total_ht={total_ht}",
+                f"pose_sold={pose_sold}",
+                f"pose_amount={pose_amount}",
                 f"esc_gamme={esc_gamme}",
                 f"esc_finition_marches={esc_finition_marches}",
                 f"esc_essence={esc_essence}",
@@ -109,26 +118,23 @@ class DevisParser:
                 text_parts.append(page_text)
         return "\n".join(text_parts)
 
-    def _find_amount_before(self, lines, label):
-        for idx, line in enumerate(lines):
-            if label in line:
-                before = line.split(label)[0]
-                amount = self._extract_amount(before)
-                if amount:
-                    return amount
-                if idx > 0:
-                    amount = self._extract_amount(lines[idx - 1])
-                    if amount:
-                        return amount
+    def _find_amount_by_label(self, lines, pattern):
+        regex = re.compile(pattern, re.IGNORECASE)
+        for line in lines:
+            match = regex.search(line)
+            if match:
+                return self._normalize_amount(match.group(1))
         return ""
 
     def _extract_amount(self, text):
         match = AMOUNT_RE.search(text)
         if not match:
             return ""
-        value = match.group(1)
+        return self._normalize_amount(match.group(1))
+
+    def _normalize_amount(self, value: str) -> str:
         value = value.replace("\u202f", " ")
-        value = value.replace(" ", "")
+        value = re.sub(r"\s+", " ", value).strip()
         if "," in value and "." in value:
             value = value.replace(".", "")
         if "." in value:
@@ -139,23 +145,30 @@ class DevisParser:
         for line in lines:
             match = SRX_RE.search(line.replace(" ", ""))
             if match:
-                yymm = match.group(1)
-                num = match.group(2).zfill(6)
-                return yymm, num, "AFF"
+                yymm = match.group("yymm")
+                num = match.group("num")
+                return yymm, num, match.group("type")
         return None
 
     def _find_ref_affaire(self, lines):
         for idx, line in enumerate(lines):
-            if DATE_RE.search(line):
-                for prev in range(idx - 1, -1, -1):
-                    if lines[prev].strip():
-                        return lines[prev].strip()
+            if line.strip().lower().startswith("réf affaire"):
+                parts = line.split(":", 1)
+                if len(parts) > 1 and parts[1].strip():
+                    return parts[1].strip()
+                for next_idx in range(idx + 1, len(lines)):
+                    if lines[next_idx].strip():
+                        return lines[next_idx].strip()
                 return ""
         return ""
 
     def _find_client_details(self, lines):
-        block = self._find_block(lines, "code client", "contact commercial")
-        if not block:
+        code_index = None
+        for idx, line in enumerate(lines):
+            if "code client" in line.lower():
+                code_index = idx
+                break
+        if code_index is None:
             return {
                 "nom": "",
                 "adresse1": "",
@@ -166,19 +179,26 @@ class DevisParser:
                 "email": "",
                 "contact": "",
             }
-        name_index = None
-        for idx, line in enumerate(block):
-            if LETTER_RE.search(line) and not line.strip().isdigit():
-                name_index = idx
+        client_nom = ""
+        for prev in range(code_index - 1, -1, -1):
+            if lines[prev].strip():
+                client_nom = lines[prev].strip()
                 break
-        if name_index is None:
-            name_index = 0
-        client_nom = block[name_index].strip() if block else ""
-        address_lines = [line.strip() for line in block[name_index + 1 :] if line.strip()]
+        address_lines = []
+        for idx in range(code_index + 1, len(lines)):
+            line = lines[idx].strip()
+            if not line:
+                continue
+            lowered = line.lower()
+            if lowered.startswith("tél") or lowered.startswith("tel") or lowered.startswith("fax"):
+                break
+            if "contact commercial" in lowered:
+                break
+            address_lines.append(line)
         contact, address_lines = self._extract_contact(address_lines)
         adresse1, adresse2, cp, ville = self._split_address_lines(address_lines)
-        tel = self._find_phone(block)
-        email = self._find_email(block)
+        tel = self._find_phone(lines[code_index : code_index + 6])
+        email = self._find_email(lines[code_index : code_index + 6])
         return {
             "nom": client_nom,
             "adresse1": adresse1,
@@ -223,11 +243,17 @@ class DevisParser:
         for idx, line in enumerate(lines):
             lowered = line.lower()
             if "contact commercial" in lowered:
-                after = line.split(":", 1)[1].strip() if ":" in line else ""
-                if not after and idx + 1 < len(lines):
-                    after = lines[idx + 1].strip()
-                name = re.split(r"\b(?:t[eé]l|tel|t[eé]l[eé]phone|mail|email)\b", after, 1, re.IGNORECASE)[0].strip()
-                search_lines = lines[idx : idx + 3]
+                before = line.split("contact commercial", 1)[0].strip(" :-")
+                name = ""
+                if before and LETTER_RE.search(before):
+                    name = before.strip()
+                else:
+                    for prev in range(idx - 1, -1, -1):
+                        if lines[prev].strip():
+                            name = lines[prev].strip()
+                            break
+                search_start = max(idx - 2, 0)
+                search_lines = lines[search_start : idx + 3]
                 return {
                     "nom": name,
                     "tel": self._find_phone(search_lines),
@@ -249,23 +275,6 @@ class DevisParser:
                 return match.group(0).strip()
         return ""
 
-    def _find_block(self, lines, start_label, end_label):
-        start_idx = None
-        end_idx = None
-        for idx, line in enumerate(lines):
-            lowered = line.lower()
-            if start_idx is None and start_label in lowered:
-                start_idx = idx + 1
-                continue
-            if start_idx is not None and end_label in lowered:
-                end_idx = idx
-                break
-        if start_idx is None:
-            return []
-        if end_idx is None:
-            end_idx = len(lines)
-        return [line.strip() for line in lines[start_idx:end_idx] if line.strip()]
-
     def _find_modele(self, lines):
         for line in lines:
             match = re.search(r"-\s*Mod[eè]le\s*:\s*(.+)", line, re.IGNORECASE)
@@ -274,33 +283,54 @@ class DevisParser:
         return ""
 
     def _find_marche(self, lines):
-        for line in lines:
+        for idx, line in enumerate(lines):
             match = re.search(r"-\s*Marche\s*:\s*(.+)", line, re.IGNORECASE)
             if match:
-                return match.group(1).strip()
+                value = match.group(1).strip()
+                if re.search(r"\b[eé]paisseur\b", value, re.IGNORECASE):
+                    continue
+                if self._has_recent_finition(lines, idx):
+                    return value
         return ""
 
     def _extract_essence(self, finition_marches: str) -> str:
         if not finition_marches:
             return ""
         parts = finition_marches.split("-", 1)
-        return parts[0].strip()
+        essence = parts[0].strip()
+        if len(essence) < 3 or not LETTER_RE.search(essence):
+            return ""
+        return essence
 
     def _find_tete_poteau(self, lines):
         for line in lines:
-            if "poteau" in line.lower() and "(TPA)" in line:
+            if re.search(r"-\s*Poteau\s*:", line, re.IGNORECASE) and "(TPA)" in line:
                 return "TPA"
         return ""
 
     def _find_poteaux_depart(self, lines):
         for line in lines:
-            if "poteau" in line.lower():
-                lowered = line.lower()
-                if "droit" in lowered or "standard" in lowered:
-                    continue
-                if "(tpa)" in lowered:
-                    continue
-                cleaned = re.sub(r"^[\-\s]*", "", line).strip()
-                cleaned = re.sub(r"\([^)]*\)", "", cleaned).strip()
-                return cleaned
+            match = re.search(r"-\s*Poteau\s*:\s*(.+)", line, re.IGNORECASE)
+            if match:
+                value = match.group(1).strip()
+                value = re.sub(r"\([^)]*\)", "", value).strip()
+                return value
         return ""
+
+    def _find_pose_details(self, lines):
+        pose_amount = ""
+        pose_sold = False
+        for line in lines:
+            if "pose au" in line.lower():
+                matches = EURO_AMOUNT_RE.findall(line)
+                if matches:
+                    pose_sold = True
+                    pose_amount = self._normalize_amount(matches[-1])
+        return pose_sold, pose_amount
+
+    def _has_recent_finition(self, lines, idx):
+        start = max(idx - 6, 0)
+        for prev in range(idx - 1, start - 1, -1):
+            if "FINITION" in lines[prev].upper():
+                return True
+        return False
