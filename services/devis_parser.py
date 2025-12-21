@@ -12,15 +12,18 @@ EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 PHONE_RE = re.compile(r"\b(?:\+33|0)\s?\d(?:[\s.-]?\d{2}){4}\b")
 CP_VILLE_RE = re.compile(r"\b(\d{5})\s+(.+)")
 NOISE_HEADER_RE = re.compile(
-    r"^(r[eé]alis[eé]\s+par|date\s+du\s+devis|r[eé]f\s+affaire|client|commercial|technique)\b|"
-    r"\bdevis\b",
+    r"\b(r[eé]alis[eé]\s+par|date\s+du\s+devis|r[eé]f\s+affaire|devis|facture|bon de commande)\b",
     re.IGNORECASE,
 )
 STREET_HINT_RE = re.compile(
     r"\b(rue|allee|all[ée]e|avenue|av\.?|bd|boulevard|chemin|route|impasse|zac|za)\b",
     re.IGNORECASE,
 )
-LEGAL_NOISE_RE = re.compile(r"\b(sas|sarl|rcs|naf|siret|capital|eur)\b", re.IGNORECASE)
+LEGAL_NOISE_RE = re.compile(
+    r"\b(sas|sarl|rcs|r\.c\.s|naf|siret|capital|eur|au capital)\b|b\s?\d+",
+    re.IGNORECASE,
+)
+TEL_MARKER_RE = re.compile(r"\b(t[eé]l|tel|fax)\b", re.IGNORECASE)
 ESSENCE_RE = re.compile(
     r"\b(ch[eê]ne|h[eê]tre|fr[eê]ne|sapin|pin|hêtre|chêne)\b", re.IGNORECASE
 )
@@ -29,6 +32,41 @@ ESSENCE_RE = re.compile(
 class DevisParser:
     def __init__(self, debug: bool = False):
         self.debug = debug
+
+    def _clean_line(self, value: str) -> str:
+        value = re.sub(r"[^\wÀ-ÖØ-öø-ÿ&'()/\-\., ]", " ", value)
+        value = re.sub(r"\s+", " ", value).strip()
+        return value
+
+    def _is_probable_company_name(self, value: str) -> bool:
+        if not value:
+            return False
+        cleaned = self._clean_line(value)
+        lowered = cleaned.lower()
+        if "vaugarny" in lowered:
+            return False
+        if CP_VILLE_RE.search(cleaned):
+            return False
+        if ":" in cleaned:
+            return False
+        if NOISE_HEADER_RE.search(lowered):
+            return False
+        if not (3 <= len(cleaned) <= 60):
+            return False
+        allowed_chars = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ&\-/ ]", cleaned)
+        if not allowed_chars:
+            return False
+        if (len(allowed_chars) / max(len(cleaned), 1)) < 0.7:
+            return False
+        return True
+
+    def _dump_lines_around(self, lines: list[str], index: int, radius: int = 7) -> str:
+        if index is None:
+            return ""
+        start = max(index - radius, 0)
+        end = min(index + radius + 1, len(lines))
+        snippet = [f"{idx}:{lines[idx]}" for idx in range(start, end)]
+        return "\n".join(snippet)
 
     def parse(self, path: Path) -> dict:
         text = self._extract_text(path)
@@ -68,6 +106,18 @@ class DevisParser:
         client_details = self._find_client_details(lines)
         commercial_details = self._find_commercial_details(lines)
         srx_debug = self.debug and "SRX2511AFF037501" in text.replace(" ", "")
+        if "réalisé par" in client_details["nom"].lower():
+            dump = self._dump_lines_around(lines, client_details.get("code_index"))
+            warnings.append(
+                "Client: nom contient 'Réalisé par'.\n"
+                f"[PARSE] context around Code client:\n{dump}"
+            )
+        if CP_VILLE_RE.search(commercial_details["nom"]):
+            dump = self._dump_lines_around(lines, commercial_details.get("contact_index"))
+            warnings.append(
+                "Commercial: nom ressemble à un CP/Ville.\n"
+                f"[PARSE] context around contact commercial:\n{dump}"
+            )
         if srx_debug:
             if "réalisé par" in client_details["nom"].lower():
                 warnings.append("Client SRX: nom contient 'Réalisé par'.")
@@ -139,6 +189,9 @@ class DevisParser:
         }
         if self.debug:
             data["debug"] = [
+                f"[PARSE] client_nom={client_details['nom']}",
+                f"[PARSE] client_cp_ville={client_details['cp']} {client_details['ville']}".strip(),
+                f"[PARSE] commercial_nom={commercial_details['nom']}",
                 f"devis_annee_mois={devis_annee_mois}",
                 f"devis_type={devis_type}",
                 f"devis_num={devis_num}",
@@ -180,6 +233,7 @@ class DevisParser:
                         f"srx_commercial_nom={commercial_details['nom']}",
                     ]
                 )
+            self._run_internal_debug_test(path, data, warnings)
         return data
 
     def _extract_text(self, path: Path) -> str:
@@ -274,75 +328,56 @@ class DevisParser:
                 "tel": "",
                 "email": "",
                 "contact": "",
+                "code_index": None,
             }
-        client_nom = ""
-        best_score = None
-        best_candidate = ""
-        scan_start = max(code_index - 8, 0)
-        for prev in range(code_index - 1, scan_start - 1, -1):
-            candidate = lines[prev].strip()
-            if not candidate:
-                continue
-            lowered = candidate.lower()
-            if "vaugarny" in lowered:
-                continue
-            if re.search(r"\d{5}", candidate):
-                continue
-            if CP_VILLE_RE.search(candidate):
-                continue
-            if ":" in candidate and NOISE_HEADER_RE.search(lowered):
-                continue
-            score = 0
-            if not re.search(r"\d", candidate):
-                score += 2
-            if ":" not in candidate:
-                score += 2
-            if 3 <= len(candidate) <= 40:
-                score += 1
-            letters = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ ]", candidate)
-            if letters and (len(letters) / max(len(candidate), 1)) >= 0.7:
-                score += 2
-            if NOISE_HEADER_RE.search(candidate):
-                score -= 5
-            if CP_VILLE_RE.search(candidate):
-                score -= 3
-            if best_score is None or score > best_score:
-                best_score = score
-                best_candidate = candidate
-        if best_score is not None:
-            client_nom = best_candidate
-        if not client_nom:
-            for prev in range(code_index - 1, -1, -1):
-                candidate = lines[prev].strip()
-                if not candidate:
-                    continue
-                lowered = candidate.lower()
-                if (
-                    lowered.startswith("date du devis")
-                    or lowered.startswith("réf affaire")
-                    or "devis" in lowered
-                ):
-                    continue
-                client_nom = candidate
-                break
-        address_lines = []
+        client_block_lines = []
         for idx in range(code_index + 1, len(lines)):
-            line = lines[idx].strip()
+            line = self._clean_line(lines[idx])
             if not line:
                 continue
             lowered = line.lower()
+            if "contact commercial" in lowered:
+                stop_at = lowered.find("contact commercial")
+                snippet = line[:stop_at].strip()
+                if snippet and not self._is_legal_noise(snippet) and "vaugarny" not in snippet.lower():
+                    client_block_lines.append(snippet)
+                break
+            tel_match = TEL_MARKER_RE.search(line)
+            if tel_match:
+                snippet = line[: tel_match.start()].strip()
+                if snippet and not self._is_legal_noise(snippet) and "vaugarny" not in snippet.lower():
+                    client_block_lines.append(snippet)
+                break
             if self._is_legal_noise(line):
                 continue
-            stripped, should_stop = self._strip_after_keywords(
-                line, ["tél", "tel", "contact commercial"]
-            )
-            if should_stop:
-                if stripped and not self._is_legal_noise(stripped):
-                    address_lines.append(stripped)
-                break
             if "vaugarny" in lowered:
                 continue
-            address_lines.append(line)
+            client_block_lines.append(line)
+        client_nom = ""
+        address_lines = []
+        if client_block_lines:
+            first_line = self._clean_line(client_block_lines[0])
+            if self._is_probable_company_name(first_line):
+                client_nom = first_line
+                address_lines = client_block_lines[1:]
+            else:
+                address_lines = client_block_lines
+        if not client_nom:
+            scan_start = max(code_index - 12, 0)
+            for prev in range(code_index - 1, scan_start - 1, -1):
+                candidate = self._clean_line(lines[prev])
+                if not candidate:
+                    continue
+                lowered = candidate.lower()
+                if "vaugarny" in lowered:
+                    continue
+                if CP_VILLE_RE.search(candidate):
+                    continue
+                if NOISE_HEADER_RE.search(lowered):
+                    continue
+                if self._is_probable_company_name(candidate):
+                    client_nom = candidate
+                    break
         contact, address_lines = self._extract_contact(address_lines)
         adresse1, adresse2, cp, ville = self._split_address_lines(address_lines)
         tel = self._find_phone(lines[code_index : code_index + 6])
@@ -356,21 +391,11 @@ class DevisParser:
             "tel": tel,
             "email": email,
             "contact": contact,
+            "code_index": code_index,
         }
 
     def _is_legal_noise(self, line: str) -> bool:
         return LEGAL_NOISE_RE.search(line) is not None
-
-    def _strip_after_keywords(self, line: str, keywords: list[str]) -> tuple[str, bool]:
-        lowered = line.lower()
-        match_positions = [
-            lowered.find(keyword) for keyword in keywords if lowered.find(keyword) != -1
-        ]
-        if not match_positions:
-            return line.strip(), False
-        cut_at = min(match_positions)
-        stripped = line[:cut_at].strip()
-        return stripped, True
 
     def _extract_contact(self, lines):
         filtered = []
@@ -386,7 +411,6 @@ class DevisParser:
     def _split_address_lines(self, address_lines):
         cp = ""
         ville = ""
-        remaining = []
         cp_candidates = []
         for idx, line in enumerate(address_lines):
             match = CP_VILLE_RE.search(line)
@@ -395,27 +419,20 @@ class DevisParser:
                     {
                         "cp": match.group(1),
                         "ville": match.group(2).strip(),
-                        "prefix": line[: match.start()].strip(),
                         "prev_line": address_lines[idx - 1].strip() if idx > 0 else "",
                         "index": idx,
                     }
                 )
-                continue
-            remaining.append(line)
-        if cp_candidates:
-            cp_choice = self._choose_cp_ville(cp_candidates)
-            cp = cp_choice["cp"]
-            ville = cp_choice["ville"]
-            candidate_by_index = {candidate["index"]: candidate for candidate in cp_candidates}
-            rebuilt = []
-            for idx, line in enumerate(address_lines):
-                candidate = candidate_by_index.get(idx)
-                if candidate:
-                    if candidate is cp_choice and candidate["prefix"]:
-                        rebuilt.append(candidate["prefix"])
-                    continue
-                rebuilt.append(line)
-            remaining = rebuilt
+        if not cp_candidates:
+            adresse1 = address_lines[0] if address_lines else ""
+            adresse2 = " ".join(address_lines[1:]) if len(address_lines) > 1 else ""
+            return adresse1, adresse2, cp, ville
+        cp_choice = self._choose_cp_ville(cp_candidates)
+        cp = cp_choice["cp"]
+        ville = cp_choice["ville"]
+        remaining = [
+            line for idx, line in enumerate(address_lines) if idx != cp_choice["index"]
+        ]
         adresse1 = remaining[0] if remaining else ""
         adresse2 = " ".join(remaining[1:]) if len(remaining) > 1 else ""
         return adresse1, adresse2, cp, ville
@@ -428,10 +445,7 @@ class DevisParser:
             prev_line = candidate["prev_line"]
             if re.search(r"\d+", prev_line) and STREET_HINT_RE.search(prev_line):
                 score += 3
-            if candidate["ville"] and (
-                candidate["ville"].isupper()
-                or re.search(r"[A-Z].*[A-Z]", candidate["ville"])
-            ):
+            if self._is_majority_upper(candidate["ville"]):
                 score += 1
             if LEGAL_NOISE_RE.search(prev_line):
                 score -= 3
@@ -440,6 +454,13 @@ class DevisParser:
                 best = candidate
         return best if best is not None else candidates[-1]
 
+    def _is_majority_upper(self, value: str) -> bool:
+        letters = [char for char in value if char.isalpha()]
+        if not letters:
+            return False
+        upper_count = sum(1 for char in letters if char.isupper())
+        return (upper_count / len(letters)) >= 0.6
+
     def _find_commercial_details(self, lines):
         for idx, line in enumerate(lines):
             lowered = line.lower()
@@ -447,41 +468,49 @@ class DevisParser:
                 name = ""
                 match = re.search(r"contact commercial\s*:\s*(.+)", line, re.IGNORECASE)
                 if match:
-                    name = match.group(1).strip()
+                    candidate = self._clean_line(match.group(1))
+                    if self._is_valid_commercial_name_candidate(candidate):
+                        name = candidate
                 if not name:
-                    for next_idx in range(idx + 1, min(idx + 7, len(lines))):
-                        candidate = lines[next_idx].strip()
+                    for next_idx in range(idx + 1, min(idx + 9, len(lines))):
+                        candidate = self._clean_line(lines[next_idx])
                         if self._is_valid_commercial_name_candidate(candidate):
                             name = candidate
                             break
                 if not name:
-                    for prev in range(idx - 1, max(idx - 7, -1), -1):
-                        candidate = lines[prev].strip()
+                    for prev in range(idx - 1, max(idx - 9, -1), -1):
+                        candidate = self._clean_line(lines[prev])
                         if self._is_valid_commercial_name_candidate(candidate):
                             name = candidate
                             break
-                if name.lower().startswith("contact commercial"):
+                if "contact commercial" in name.lower():
                     name = ""
                 search_start = max(idx - 3, 0)
-                search_lines = lines[search_start : idx + 9]
+                search_lines = lines[search_start : idx + 11]
                 return {
                     "nom": name,
                     "tel": self._find_phone(search_lines),
                     "email": self._find_email(search_lines),
+                    "contact_index": idx,
                 }
-        return {"nom": "", "tel": "", "email": ""}
+        return {"nom": "", "tel": "", "email": "", "contact_index": None}
 
     def _is_valid_commercial_name_candidate(self, candidate: str) -> bool:
         if not candidate:
             return False
-        lowered = candidate.lower()
-        if CP_VILLE_RE.search(candidate):
+        cleaned = self._clean_line(candidate)
+        lowered = cleaned.lower()
+        if CP_VILLE_RE.search(cleaned):
             return False
-        if "@" in candidate:
+        if "@" in cleaned:
             return False
-        if any(keyword in lowered for keyword in ("tél", "tel", "fax", "code client")):
+        if TEL_MARKER_RE.search(cleaned):
             return False
-        words = [word for word in candidate.split() if LETTER_RE.search(word)]
+        if NOISE_HEADER_RE.search(lowered):
+            return False
+        if "contact commercial" in lowered:
+            return False
+        words = [word for word in cleaned.split() if LETTER_RE.search(word)]
         return len(words) >= 2
 
     def _find_phone(self, lines):
@@ -497,6 +526,21 @@ class DevisParser:
             if match:
                 return match.group(0).strip()
         return ""
+
+    def _run_internal_debug_test(self, path: Path, data: dict, warnings: list[str]) -> None:
+        if path.name != "SRX2511AFF037501_20251202_161449.pdf":
+            return
+        failures = []
+        if data.get("client_nom") != "BERVAL MAISONS":
+            failures.append("client_nom attendu 'BERVAL MAISONS'")
+        if CP_VILLE_RE.search(data.get("commercial_nom", "")):
+            failures.append("commercial_nom ne doit pas matcher CP/Ville")
+        if "contact commercial" in data.get("commercial_nom", "").lower():
+            failures.append("commercial_nom ne doit pas contenir 'Contact commercial'")
+        if data.get("client_cp") != "77100":
+            failures.append("client_cp attendu '77100'")
+        if failures:
+            warnings.append("SRX DEBUG TEST FAILED: " + "; ".join(failures))
 
     def _find_modele(self, lines):
         for line in lines:
