@@ -221,9 +221,12 @@ class BdcFiller:
     def _pose_amount(self, data: dict) -> str:
         if data.get("pose_sold"):
             return data.get("pose_amount") or data.get("prestations_ht", "")
-        return ""
+        return data.get("prestations_ht", "")
 
     def _build_client_adresse(self, data: dict) -> str:
+        direct = (data.get("client_adresse") or "").strip()
+        if direct:
+            return direct
         lines = []
         for key in ("client_adresse1", "client_adresse2"):
             value = (data.get(key) or "").strip()
