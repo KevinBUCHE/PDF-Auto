@@ -129,7 +129,7 @@ class BdcFiller:
                 if isinstance(value, str)
             }
             for page in writer.pages:
-                writer.update_page_form_field_values(page, text_values)
+                self._update_page_fields(writer, page, text_values)
 
             checkbox_values = {
                 key: value
@@ -143,44 +143,18 @@ class BdcFiller:
                 annots = annots.get_object()
                 for annot in annots:
                     ao = annot.get_object()
-                    name = ao.get("/T")
-                    if isinstance(name, (NameObject, TextStringObject, str)):
-                        name = str(name)
-                    if name not in checkbox_values or ao.get("/FT") != "/Btn":
+                    field_obj, name = self._resolve_field_name(ao)
+                    if name not in checkbox_values:
+                        continue
+                    if field_obj.get("/FT") != "/Btn" and ao.get("/FT") != "/Btn":
                         continue
                     desired = checkbox_values[name]
-                    on_value = None
-                    ap = ao.get("/AP")
-                    if ap:
-                        ap = ap.get_object()
-                        normal = ap.get("/N")
-                        if normal:
-                            normal = (
-                                normal.get_object()
-                                if hasattr(normal, "get_object")
-                                else normal
-                            )
-                            keys = list(normal.keys())
-                            for key in keys:
-                                if str(key) != "/Off":
-                                    on_value = str(key)
-                                    break
+                    on_value = self._get_checkbox_on_value(ao) or self._get_checkbox_on_value(
+                        field_obj
+                    )
                     if on_value is None:
-                        on_value = "/Yes"
-                    if desired:
-                        ao.update(
-                            {
-                                NameObject("/V"): NameObject(on_value),
-                                NameObject("/AS"): NameObject(on_value),
-                            }
-                        )
-                    else:
-                        ao.update(
-                            {
-                                NameObject("/V"): NameObject("/Off"),
-                                NameObject("/AS"): NameObject("/Off"),
-                            }
-                        )
+                        on_value = NameObject("/Yes")
+                    self._set_checkbox_value(field_obj, ao, desired, on_value)
 
             output_path.parent.mkdir(parents=True, exist_ok=True)
             with open(output_path, "wb") as output_file:
@@ -221,7 +195,18 @@ class BdcFiller:
             "bdc_livraison_bloc": livraison_bloc,
             "bdc_esc_gamme": data.get("esc_gamme", ""),
             "bdc_esc_finition_marches": data.get("esc_finition_marches", ""),
+            "bdc_esc_finition_structure": data.get("esc_finition_structure", ""),
+            "bdc_esc_finition_mains_courante": data.get(
+                "esc_finition_mains_courante", ""
+            ),
+            "bdc_esc_finition_contremarche": data.get("esc_finition_contremarche", ""),
+            "bdc_esc_finition_rampe": data.get("esc_finition_rampe", ""),
             "bdc_esc_essence": data.get("esc_essence", ""),
+            "bdc_esc_main_courante": data.get("esc_main_courante", ""),
+            "bdc_esc_main_courante_scellement": data.get(
+                "esc_main_courante_scellement", ""
+            ),
+            "bdc_esc_nez_de_marches": data.get("esc_nez_de_marches", ""),
             "bdc_esc_tete_de_poteau": data.get("esc_tete_de_poteau", ""),
             "bdc_esc_poteaux_depart": data.get("esc_poteaux_depart", ""),
         }
@@ -236,7 +221,7 @@ class BdcFiller:
     def _pose_amount(self, data: dict) -> str:
         if data.get("pose_sold"):
             return data.get("pose_amount") or data.get("prestations_ht", "")
-        return data.get("prestations_ht", "")
+        return ""
 
     def _build_client_adresse(self, data: dict) -> str:
         lines = []
@@ -263,25 +248,57 @@ class BdcFiller:
         return values_to_set
 
     def _collect_field_names(self, reader: PdfReader) -> set[str]:
-        root = reader.trailer.get("/Root", {})
-        acroform = root.get("/AcroForm")
-        if isinstance(acroform, IndirectObject):
-            acroform = acroform.get_object()
-        fields = acroform.get("/Fields", []) if acroform else []
         names = set()
-
-        def walk(nodes):
-            for node in nodes:
-                node_obj = node.get_object() if hasattr(node, "get_object") else node
-                name = node_obj.get("/T")
-                if isinstance(name, (NameObject, TextStringObject, str)):
-                    names.add(str(name))
-                kids = node_obj.get("/Kids", [])
-                if kids:
-                    walk(kids)
-
-        walk(fields)
+        for page in reader.pages:
+            annots = page.get("/Annots")
+            if not annots:
+                continue
+            annots = annots.get_object()
+            for annot in annots:
+                ao = annot.get_object()
+                _, name = self._resolve_field_name(ao)
+                if name:
+                    names.add(name)
         return names
+
+    def _update_page_fields(self, writer: PdfWriter, page, values: dict):
+        try:
+            writer.update_page_form_field_values(page, values, auto_regenerate=True)
+        except TypeError:
+            writer.update_page_form_field_values(page, values)
+
+    def _resolve_field_name(self, annotation):
+        name = annotation.get("/T")
+        field_obj = annotation
+        if name is None and annotation.get("/Parent"):
+            field_obj = annotation.get("/Parent").get_object()
+            name = field_obj.get("/T")
+        if isinstance(name, (NameObject, TextStringObject, str)):
+            name = str(name)
+        return field_obj, name
+
+    def _get_checkbox_on_value(self, field_obj):
+        ap = field_obj.get("/AP")
+        if not ap:
+            return None
+        ap = ap.get_object() if hasattr(ap, "get_object") else ap
+        normal = ap.get("/N")
+        if not normal:
+            return None
+        normal = normal.get_object() if hasattr(normal, "get_object") else normal
+        for key in normal.keys():
+            if str(key) != "/Off":
+                return NameObject(str(key))
+        return None
+
+    def _set_checkbox_value(self, field_obj, widget_obj, desired: bool, on_value):
+        value = on_value if desired else NameObject("/Off")
+        field_obj.update({NameObject("/V"): value, NameObject("/AS"): value})
+        widget_obj.update({NameObject("/AS"): value})
+        kids = field_obj.get("/Kids", [])
+        for kid in kids:
+            kid_obj = kid.get_object() if hasattr(kid, "get_object") else kid
+            kid_obj.update({NameObject("/AS"): value})
 
     def _validate_output_fields(self, output_path: Path, field_names: list[str]):
         reader = PdfReader(str(output_path))

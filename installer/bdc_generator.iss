@@ -19,6 +19,9 @@ Name: "french"; MessagesFile: "compiler:Languages\French.isl"
 [Files]
 Source: "..\dist\BDC Generator\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs
 
+[Dirs]
+Name: "{userappdata}\{#MyAppName}\Templates"; Flags: uninsneveruninstall
+
 [Icons]
 Name: "{userdesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"
 Name: "{userprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"

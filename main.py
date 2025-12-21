@@ -28,21 +28,25 @@ class DevisItem:
     pose_sold: bool
     pose_source: str
     auto_pose_sold: bool
+    auto_pose_status: str
 
 
 class DropTable(QtWidgets.QTableWidget):
     files_dropped = QtCore.Signal(list)
 
     def __init__(self, parent=None):
-        super().__init__(0, 4, parent)
+        super().__init__(0, 5, parent)
         self.setAcceptDrops(True)
-        self.setHorizontalHeaderLabels(["Fichier devis", "Pose vendue", "Origine", "Statut"])
+        self.setHorizontalHeaderLabels(
+            ["Fichier devis", "Pose vendue", "Forcer", "Origine", "Statut"]
+        )
         header = self.horizontalHeader()
         header.setStretchLastSection(True)
         header.setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
         header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
         header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(3, QtWidgets.QHeaderView.Stretch)
+        header.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, QtWidgets.QHeaderView.Stretch)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -106,8 +110,8 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addLayout(template_layout)
 
         info_label = QtWidgets.QLabel(
-            "Glissez-déposez vos devis PDF SRX*. La pose est détectée automatiquement (colonne Auto). "
-            "Vous pouvez forcer via le checkbox si besoin."
+            "Glissez-déposez vos devis PDF SRX*. La pose est détectée automatiquement "
+            "(colonne Origine). Cochez “Forcer” pour ajuster la pose."
         )
         info_label.setWordWrap(True)
         layout.addWidget(info_label)
@@ -231,10 +235,28 @@ class MainWindow(QtWidgets.QMainWindow):
                     pose_sold=pose_sold,
                     pose_source="auto" if pose_status == "auto" else "unreadable",
                     auto_pose_sold=pose_sold,
+                    auto_pose_status=pose_status,
                 )
                 if pose_status == "unreadable":
                     self.log(f"{path.name}: détection pose impossible, valeur par défaut = non.")
                 self.log(f"Ajouté: {path.name} (pose: {'oui' if pose_sold else 'non'})")
+                if "SRX2511AFF037501" in path.name:
+                    self.log(
+                        "[TEST] SRX2511AFF037501 client_nom="
+                        f"{data.get('client_nom')!r} (attendu 'BERVAL MAISONS')"
+                    )
+                    self.log(
+                        "[TEST] SRX2511AFF037501 ref_affaire="
+                        f"{data.get('ref_affaire')!r}"
+                    )
+                    self.log(
+                        "[TEST] SRX2511AFF037501 fourniture_ht="
+                        f"{data.get('fourniture_ht')!r} (attendu '4 894,08')"
+                    )
+                    self.log(
+                        "[TEST] SRX2511AFF037501 prestations_ht="
+                        f"{data.get('prestations_ht')!r} (attendu '1 159,12')"
+                    )
                 for entry in data.get("debug", []):
                     self.log(f"[debug] {path.name}: {entry}")
             except Exception as exc:  # pylint: disable=broad-except
@@ -257,35 +279,80 @@ class MainWindow(QtWidgets.QMainWindow):
         file_item.setFlags(file_item.flags() ^ QtCore.Qt.ItemIsEditable)
         self.table.setItem(row, 0, file_item)
 
-        checkbox = QtWidgets.QTableWidgetItem()
-        checkbox.setFlags(QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemIsEnabled)
-        checkbox.setCheckState(QtCore.Qt.Checked if pose_sold else QtCore.Qt.Unchecked)
-        self.table.setItem(row, 1, checkbox)
+        pose_item = QtWidgets.QTableWidgetItem()
+        pose_item.setFlags(QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemIsEnabled)
+        pose_item.setCheckState(QtCore.Qt.Checked if pose_sold else QtCore.Qt.Unchecked)
+        self.table.setItem(row, 1, pose_item)
+
+        force_item = QtWidgets.QTableWidgetItem()
+        force_item.setFlags(QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemIsEnabled)
+        force_item.setCheckState(QtCore.Qt.Unchecked)
+        self.table.setItem(row, 2, force_item)
+
+        self._set_pose_editable(row, False)
 
         origin_item = QtWidgets.QTableWidgetItem(
             "Auto" if pose_status == "auto" else "À vérifier"
         )
         origin_item.setFlags(origin_item.flags() ^ QtCore.Qt.ItemIsEditable)
         origin_item.setToolTip(origin_item.text())
-        self.table.setItem(row, 2, origin_item)
+        self.table.setItem(row, 3, origin_item)
 
         status_item = QtWidgets.QTableWidgetItem("En attente")
         status_item.setFlags(status_item.flags() ^ QtCore.Qt.ItemIsEditable)
-        self.table.setItem(row, 3, status_item)
+        self.table.setItem(row, 4, status_item)
         self._loading_table = False
+
+    def _set_pose_editable(self, row: int, enabled: bool):
+        pose_item = self.table.item(row, 1)
+        if not pose_item:
+            return
+        flags = pose_item.flags()
+        if enabled:
+            pose_item.setFlags(flags | QtCore.Qt.ItemIsEnabled)
+        else:
+            pose_item.setFlags(flags & ~QtCore.Qt.ItemIsEnabled)
 
     def handle_item_changed(self, item):
         if self._loading_table:
             return
-        if item.column() != 1:
+        if item.column() not in (1, 2):
             return
         file_item = self.table.item(item.row(), 0)
-        origin_item = self.table.item(item.row(), 2)
+        origin_item = self.table.item(item.row(), 3)
+        force_item = self.table.item(item.row(), 2)
         if not file_item or not origin_item:
             return
         path = Path(file_item.text())
         devis_item = self.devis_items.get(path)
         if not devis_item:
+            return
+        if item.column() == 2:
+            forced = item.checkState() == QtCore.Qt.Checked
+            self._set_pose_editable(item.row(), forced)
+            if forced:
+                origin_item.setText("Forcé")
+                origin_item.setToolTip("Forcé")
+            else:
+                pose_item = self.table.item(item.row(), 1)
+                if pose_item:
+                    pose_item.setCheckState(
+                        QtCore.Qt.Checked
+                        if devis_item.auto_pose_sold
+                        else QtCore.Qt.Unchecked
+                    )
+                devis_item.pose_sold = devis_item.auto_pose_sold
+                devis_item.pose_source = "auto"
+                devis_item.data["pose_sold"] = devis_item.auto_pose_sold
+                origin_text = (
+                    "Auto"
+                    if devis_item.auto_pose_status == "auto"
+                    else "À vérifier"
+                )
+                origin_item.setText(origin_text)
+                origin_item.setToolTip(origin_text)
+            return
+        if force_item and force_item.checkState() != QtCore.Qt.Checked:
             return
         pose_sold = item.checkState() == QtCore.Qt.Checked
         devis_item.pose_sold = pose_sold
@@ -309,7 +376,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for row in range(self.table.rowCount()):
             file_item = self.table.item(row, 0)
             pose_item = self.table.item(row, 1)
-            status_item = self.table.item(row, 3)
+            status_item = self.table.item(row, 4)
             if not file_item:
                 continue
             path = Path(file_item.text())
