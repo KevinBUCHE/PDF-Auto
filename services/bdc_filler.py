@@ -9,26 +9,67 @@ from pypdf.generic import BooleanObject, NameObject, TextStringObject
 
 
 TEXT_FIELDS = {
-    "bdc_date_commande",
-    "bdc_client_nom",
     "bdc_client_adresse",
+    "bdc_client_nom",
     "bdc_commercial_nom",
-    "bdc_ref_affaire",
+    "bdc_date_commande",
     "bdc_devis_annee_mois",
     "bdc_devis_num",
+    "bdc_esc_essence",
+    "bdc_esc_finition_contremarche",
+    "bdc_esc_finition_mains_courante",
+    "bdc_esc_finition_marches",
+    "bdc_esc_finition_rampe",
+    "bdc_esc_finition_structure",
+    "bdc_esc_gamme",
+    "bdc_esc_main_courante",
+    "bdc_esc_main_courante_scellement",
+    "bdc_esc_nez_de_marches",
+    "bdc_esc_poteaux_depart",
+    "bdc_esc_remplissage_garde_corps_soubassement",
+    "bdc_esc_section_poteau",
+    "bdc_esc_section_remplissage_garde_corps_etage",
+    "bdc_esc_section_remplissage_garde_corps_rampant",
+    "bdc_esc_tete_de_poteau",
+    "bdc_livraison_bloc",
     "bdc_montant_fourniture_ht",
     "bdc_montant_pose_ht",
-    "bdc_livraison_bloc",
-    "bdc_esc_gamme",
-    "bdc_esc_essence",
-    "bdc_esc_finition_marches",
-    "bdc_esc_tete_de_poteau",
-    "bdc_esc_poteaux_depart",
+    "bdc_ref_affaire",
 }
 
 CHECKBOX_FIELDS = {
-    "bdc_chk_livraison_poseur",
+    "bdc_chk_avec-contre-marches",
+    "bdc_chk_avec-sans-marches",
+    "bdc_chk_cremaillere",
+    "bdc_chk_habillage_de_dalle_complet",
+    "bdc_chk_habillage_de_dalle_corniere",
+    "bdc_chk_habillage_de_dalle_sans",
+    "bdc_chk_habillage_de_dalle_standard",
+    "bdc_chk_limon",
+    "bdc_chk_limon_centrale",
+    "bdc_chk_limon_decoupe",
     "bdc_chk_livraison_client",
+    "bdc_chk_livraison_poseur",
+    "bdc_chk_main_courante_scellement_cintree",
+    "bdc_chk_main_courante_scellement_droite",
+    "bdc_chk_marche_arrondi",
+    "bdc_chk_marche_devant-poteaux",
+    "bdc_chk_marche_droite",
+    "bdc_chk_marche_option-double",
+    "bdc_chk_marche_option-galbe",
+    "bdc_chk_marche_saillante",
+    "bdc_chk_nez_de_marches_ferrodo",
+    "bdc_chk_nez_de_marches_stries",
+    "bdc_chk_nez_de_marches_stries_arrete",
+    "bdc_chk_norme_bhc_exist",
+    "bdc_chk_norme_bhc_neuf",
+    "bdc_chk_norme_erp_exist",
+    "bdc_chk_norme_erp_neuf",
+    "bdc_chk_norme_nfp",
+    "bdc_chk_norme_pmr",
+    "bdc_chk_style_demonte",
+    "bdc_chk_style_premonte",
+    "bdc_chk_style_tradi",
 }
 
 CRITICAL_FIELDS = {
@@ -68,10 +109,11 @@ class BdcFiller:
             fields = self._build_fields(data)
             checkbox_states = self._build_checkbox_states(data)
 
+            expected_fields = TEXT_FIELDS | CHECKBOX_FIELDS
             missing_critical = [
                 name for name in CRITICAL_FIELDS if name not in bdc_fields
             ]
-            for name in sorted(TEXT_FIELDS | CHECKBOX_FIELDS):
+            for name in sorted(expected_fields):
                 if name not in bdc_fields:
                     self._log(f"Champ bdc_* introuvable: {name}")
             if missing_critical:
@@ -79,6 +121,11 @@ class BdcFiller:
                     "Champs critiques manquants dans le template: "
                     f"{', '.join(missing_critical)}"
                 )
+
+            values_to_set = self._build_values_to_set(
+                fields, checkbox_states, bdc_fields
+            )
+            self._log(f"values_to_set={values_to_set}")
 
             self._apply_text_fields(field_map, fields, bdc_fields)
             self._apply_checkboxes(field_map, checkbox_states, bdc_fields)
@@ -143,9 +190,21 @@ class BdcFiller:
             lines.append(" ".join(part for part in (cp, ville) if part))
         return "\n".join(lines)
 
+    def _build_values_to_set(
+        self, fields: dict, checkbox_states: dict, bdc_fields: set[str]
+    ) -> dict:
+        values_to_set = {}
+        for name, value in fields.items():
+            if name in TEXT_FIELDS and name in bdc_fields:
+                values_to_set[name] = value
+        for name, state in checkbox_states.items():
+            if name in CHECKBOX_FIELDS and name in bdc_fields:
+                values_to_set[name] = state
+        return values_to_set
+
     def _apply_text_fields(self, field_map: dict, fields: dict, bdc_fields: set[str]):
         for name, value in fields.items():
-            if name not in bdc_fields:
+            if name not in TEXT_FIELDS or name not in bdc_fields:
                 continue
             entry = field_map.get(name)
             if not entry:
@@ -158,7 +217,7 @@ class BdcFiller:
         self, field_map: dict, checkbox_states: dict, bdc_fields: set[str]
     ):
         for name, state in checkbox_states.items():
-            if name not in bdc_fields:
+            if name not in CHECKBOX_FIELDS or name not in bdc_fields:
                 continue
             entry = field_map.get(name)
             if not entry:
