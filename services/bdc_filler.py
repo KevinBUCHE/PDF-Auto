@@ -5,7 +5,7 @@ import traceback
 from typing import Callable, Optional
 
 from pypdf import PdfReader, PdfWriter
-from pypdf.generic import BooleanObject, NameObject, TextStringObject
+from pypdf.generic import BooleanObject, IndirectObject, NameObject, TextStringObject
 
 
 TEXT_FIELDS = {
@@ -87,24 +87,20 @@ class BdcFiller:
             if not template_path.exists():
                 raise FileNotFoundError(template_path)
             reader = PdfReader(str(template_path))
-            acroform, field_map = self._extract_fields(reader)
-            acroform_fields = acroform.get("/Fields") if acroform else None
+            writer = PdfWriter()
+            writer.clone_document_from_reader(reader)
+            root = writer._root_object
+            acro = root.get("/AcroForm")
+            if isinstance(acro, IndirectObject):
+                acro = acro.get_object()
+            if acro is None:
+                raise ValueError("AcroForm absent")
+            acro.update({NameObject("/NeedAppearances"): BooleanObject(True)})
             self._log(f"Template utilisé: {template_path}")
-            bdc_fields = {
-                name for name in field_map.keys() if str(name).startswith("bdc_")
-            }
+            field_names = self._collect_field_names(reader)
+            bdc_fields = {name for name in field_names if str(name).startswith("bdc_")}
             self._log(f"Champs bdc_* détectés: {len(bdc_fields)}")
             self._log(f"Liste champs bdc_*: {sorted(bdc_fields)}")
-            if not acroform or not acroform_fields:
-                raise ValueError(
-                    "Template PDF is missing /AcroForm or /Fields; cannot fill form fields."
-                )
-            writer = PdfWriter()
-            for page in reader.pages:
-                writer.add_page(page)
-
-            acroform.update({NameObject("/NeedAppearances"): BooleanObject(True)})
-            writer._root_object.update({NameObject("/AcroForm"): acroform})
 
             fields = self._build_fields(data)
             checkbox_states = self._build_checkbox_states(data)
@@ -127,12 +123,76 @@ class BdcFiller:
             )
             self._log(f"values_to_set={values_to_set}")
 
-            self._apply_text_fields(field_map, fields, bdc_fields)
-            self._apply_checkboxes(field_map, checkbox_states, bdc_fields)
+            text_values = {
+                key: value
+                for key, value in values_to_set.items()
+                if isinstance(value, str)
+            }
+            for page in writer.pages:
+                writer.update_page_form_field_values(page, text_values)
+
+            checkbox_values = {
+                key: value
+                for key, value in values_to_set.items()
+                if isinstance(value, bool)
+            }
+            for page in writer.pages:
+                annots = page.get("/Annots")
+                if not annots:
+                    continue
+                annots = annots.get_object()
+                for annot in annots:
+                    ao = annot.get_object()
+                    name = ao.get("/T")
+                    if isinstance(name, (NameObject, TextStringObject, str)):
+                        name = str(name)
+                    if name not in checkbox_values or ao.get("/FT") != "/Btn":
+                        continue
+                    desired = checkbox_values[name]
+                    on_value = None
+                    ap = ao.get("/AP")
+                    if ap:
+                        ap = ap.get_object()
+                        normal = ap.get("/N")
+                        if normal:
+                            normal = (
+                                normal.get_object()
+                                if hasattr(normal, "get_object")
+                                else normal
+                            )
+                            keys = list(normal.keys())
+                            for key in keys:
+                                if str(key) != "/Off":
+                                    on_value = str(key)
+                                    break
+                    if on_value is None:
+                        on_value = "/Yes"
+                    if desired:
+                        ao.update(
+                            {
+                                NameObject("/V"): NameObject(on_value),
+                                NameObject("/AS"): NameObject(on_value),
+                            }
+                        )
+                    else:
+                        ao.update(
+                            {
+                                NameObject("/V"): NameObject("/Off"),
+                                NameObject("/AS"): NameObject("/Off"),
+                            }
+                        )
 
             output_path.parent.mkdir(parents=True, exist_ok=True)
             with open(output_path, "wb") as output_file:
                 writer.write(output_file)
+            self._validate_output_fields(
+                output_path,
+                [
+                    "bdc_client_nom",
+                    "bdc_date_commande",
+                    "bdc_devis_num",
+                ],
+            )
         except Exception as exc:
             self._log(f"Erreur: {type(exc).__name__}: {exc}")
             self._log(traceback.format_exc())
@@ -202,73 +262,60 @@ class BdcFiller:
                 values_to_set[name] = state
         return values_to_set
 
-    def _apply_text_fields(self, field_map: dict, fields: dict, bdc_fields: set[str]):
-        for name, value in fields.items():
-            if name not in TEXT_FIELDS or name not in bdc_fields:
-                continue
-            entry = field_map.get(name)
-            if not entry:
-                continue
-            field = entry["field"]
-            text_value = TextStringObject("" if value is None else str(value))
-            field.update({NameObject("/V"): text_value})
-
-    def _apply_checkboxes(
-        self, field_map: dict, checkbox_states: dict, bdc_fields: set[str]
-    ):
-        for name, state in checkbox_states.items():
-            if name not in CHECKBOX_FIELDS or name not in bdc_fields:
-                continue
-            entry = field_map.get(name)
-            if not entry:
-                continue
-            field = entry["field"]
-            widgets = entry.get("widgets", [])
-            on_value = self._get_checkbox_on_value(widgets)
-            value = on_value if state else NameObject("/Off")
-            field.update({NameObject("/V"): value})
-            for widget in widgets:
-                widget.update({NameObject("/AS"): value})
-
-    def _get_checkbox_on_value(self, widgets):
-        for widget in widgets:
-            ap = widget.get("/AP")
-            if not ap:
-                continue
-            normal = ap.get("/N")
-            if not normal:
-                continue
-            for key in normal.keys():
-                if str(key) != "/Off":
-                    return NameObject(str(key))
-        return NameObject("/Yes")
-
-    def _extract_fields(self, reader: PdfReader):
+    def _collect_field_names(self, reader: PdfReader) -> set[str]:
         root = reader.trailer.get("/Root", {})
         acroform = root.get("/AcroForm")
+        if isinstance(acroform, IndirectObject):
+            acroform = acroform.get_object()
         fields = acroform.get("/Fields", []) if acroform else []
-        field_map = {}
+        names = set()
 
         def walk(nodes):
             for node in nodes:
-                name = node.get("/T")
-                name_str = None
+                node_obj = node.get_object() if hasattr(node, "get_object") else node
+                name = node_obj.get("/T")
                 if isinstance(name, (NameObject, TextStringObject, str)):
-                    name_str = str(name)
-                entry = None
-                if name_str:
-                    entry = field_map.setdefault(
-                        name_str, {"field": node, "widgets": []}
-                    )
-                if node.get("/Subtype") == "/Widget" and entry is not None:
-                    entry["widgets"].append(node)
-                kids = node.get("/Kids", [])
-                if entry is not None:
-                    for kid in kids:
-                        if kid.get("/Subtype") == "/Widget":
-                            entry["widgets"].append(kid)
+                    names.add(str(name))
+                kids = node_obj.get("/Kids", [])
                 if kids:
                     walk(kids)
 
         walk(fields)
-        return acroform, field_map
+        return names
+
+    def _validate_output_fields(self, output_path: Path, field_names: list[str]):
+        reader = PdfReader(str(output_path))
+        values = self._extract_field_values(reader, set(field_names))
+        for name in field_names:
+            value = values.get(name)
+            self._log(f"Validation champ {name}: {value!r}")
+            if value in (None, "", TextStringObject("")):
+                raise ValueError("Fill failed: values not persisted")
+
+    def _extract_field_values(
+        self, reader: PdfReader, field_names: set[str]
+    ) -> dict[str, str]:
+        values = {}
+        for page in reader.pages:
+            annots = page.get("/Annots")
+            if not annots:
+                continue
+            annots = annots.get_object()
+            for annot in annots:
+                ao = annot.get_object()
+                name = ao.get("/T")
+                if isinstance(name, (NameObject, TextStringObject, str)):
+                    name = str(name)
+                field_obj = ao
+                if name is None and ao.get("/Parent"):
+                    field_obj = ao.get("/Parent").get_object()
+                    name = field_obj.get("/T")
+                    if isinstance(name, (NameObject, TextStringObject, str)):
+                        name = str(name)
+                if name in field_names and name not in values:
+                    value = field_obj.get("/V")
+                    if isinstance(value, (NameObject, TextStringObject, str)):
+                        values[name] = str(value)
+                    else:
+                        values[name] = value
+        return values
