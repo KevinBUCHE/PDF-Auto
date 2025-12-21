@@ -23,14 +23,19 @@
 
 ## 2. Utilisation
 1. Ouvrir l'application.
-2. Glisser-déposer un ou plusieurs devis PDF.
-3. Vérifier le toggle "Pose vendue" sur chaque ligne.
-4. Cliquer sur **Générer les BDC**.
-5. Les BDC sont générés dans `BDC_Output/`.
+2. Vérifier l'indicateur **Template: OK** (sinon utiliser **Ouvrir le dossier Templates** ou **Choisir un template…**).
+3. Glisser-déposer un ou plusieurs devis PDF `SRX*.pdf`.
+4. La pose est détectée automatiquement (colonne **Origine** = Auto). Vous pouvez forcer via le checkbox si besoin.
+5. Cliquer sur **Générer les BDC**.
+6. Les BDC sont générés dans `BDC_Output/`.
 
 ## 3. Règles métier appliquées
 ### Template PDF
 - Template requis : `Templates/bon de commande V1.pdf`
+- Chemin fiable :
+  - En dev : dossier du projet (`main.py`)
+  - En prod (PyInstaller) : dossier de l'exécutable
+- Les boutons **Ouvrir le dossier Templates** et **Choisir un template…** permettent de corriger rapidement.
 - `NeedAppearances` activé (Adobe Reader)
 - **Ne jamais aplatir** le PDF (formulaire éditable)
 
@@ -56,7 +61,13 @@
 - `bdc_commercial_nom = "BUCHE Kevin"`
 
 ### Détection de pose
-- Détecter la pose vendue **uniquement** si une ligne contient `Pose au ...` avec un montant.
+- Détecter la pose vendue **uniquement** si une ligne contient `Pose au ...` avec un montant
+  (sur la même ligne ou la ligne adjacente).
+- Si le texte est illisible, statut **À vérifier** et valeur par défaut = non (log affiché).
+- Colonne **Origine** :
+  - **Auto** : détection automatique.
+  - **Forcé** : l'utilisateur a modifié le checkbox.
+  - **À vérifier** : texte illisible, vérifier manuellement.
 
 ### Si pose vendue
 - `bdc_livraison_bloc` vide

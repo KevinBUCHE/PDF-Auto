@@ -17,6 +17,9 @@ class DevisParser:
     def parse(self, path: Path) -> dict:
         text = self._extract_text(path)
         lines = [line.strip() for line in text.splitlines() if line.strip()]
+        parse_warning = ""
+        if not lines:
+            parse_warning = "Texte du devis illisible ou vide."
 
         fourniture_ht = self._find_amount_before(lines, "PRIX DE LA FOURNITURE HT")
         prestations_ht = self._find_amount_before(lines, "PRIX PRESTATIONS ET SERVICES HT")
@@ -51,6 +54,7 @@ class DevisParser:
             "esc_essence": esc_essence,
             "esc_tete_de_poteau": esc_tete_de_poteau,
             "esc_poteaux_depart": esc_poteaux_depart,
+            "parse_warning": parse_warning,
         }
         if self.debug:
             data["debug"] = [
