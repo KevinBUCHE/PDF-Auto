@@ -3,6 +3,7 @@ from datetime import date
 import logging
 
 from pypdf import PdfReader, PdfWriter
+from pypdf.generic import BooleanObject, NameObject, TextStringObject
 
 
 class BdcFiller:
@@ -10,17 +11,19 @@ class BdcFiller:
         if not template_path.exists():
             raise FileNotFoundError(template_path)
         reader = PdfReader(str(template_path))
-        fields_dict = reader.get_fields() or {}
-        root = reader.trailer.get("/Root", {})
-        acroform = root.get("/AcroForm")
+        acroform, field_map = self._extract_fields(reader)
         acroform_fields = acroform.get("/Fields") if acroform else None
         logger = logging.getLogger(__name__)
         logger.info(
-            "BDC template loaded: pages=%s fields=%s acroform=%s fields_present=%s",
+            "BDC template loaded: pages=%s acroform=%s fields_present=%s",
             len(reader.pages),
-            len(fields_dict),
             bool(acroform),
             bool(acroform_fields),
+        )
+        logger.info(
+            "BDC template fields (fallback): count=%s sample=%s",
+            len(field_map),
+            list(field_map.keys())[:10],
         )
         if not acroform or not acroform_fields:
             raise ValueError(
@@ -30,8 +33,8 @@ class BdcFiller:
         for page in reader.pages:
             writer.add_page(page)
 
-        acroform.update({"/NeedAppearances": True})
-        writer._root_object.update({"/AcroForm": acroform})
+        acroform.update({NameObject("/NeedAppearances"): BooleanObject(True)})
+        writer._root_object.update({NameObject("/AcroForm"): acroform})
 
         fields = {
             "bdc_devis_annee_mois": data.get("devis_annee_mois", ""),
@@ -60,8 +63,8 @@ class BdcFiller:
 
         for page in writer.pages:
             writer.update_page_form_field_values(page, fields)
-        self._apply_text_fields(writer, fields)
-        self._apply_checkboxes(writer, checkbox_states)
+        self._apply_text_fields(field_map, fields)
+        self._apply_checkboxes(field_map, checkbox_states)
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, "wb") as output_file:
@@ -72,43 +75,69 @@ class BdcFiller:
             return data.get("pose_amount") or data.get("prestations_ht", "")
         return data.get("prestations_ht", "")
 
-    def _apply_text_fields(self, writer: PdfWriter, fields: dict):
-        acroform = writer._root_object.get("/AcroForm")
-        if not acroform:
-            return
-        root_fields = acroform.get("/Fields", [])
+    def _apply_text_fields(self, field_map: dict, fields: dict):
         for name, value in fields.items():
-            self._set_field_value(root_fields, name, value)
+            entry = field_map.get(name)
+            if not entry:
+                continue
+            field = entry["field"]
+            text_value = TextStringObject("" if value is None else str(value))
+            field.update({NameObject("/V"): text_value, NameObject("/DV"): text_value})
+            for kid in field.get("/Kids", []):
+                kid.update({NameObject("/V"): text_value, NameObject("/DV"): text_value})
 
-    def _set_field_value(self, fields, name, value):
-        found = False
-        for field in fields:
-            if field.get("/T") == name:
-                field.update({"/V": value, "/DV": value})
-                for kid in field.get("/Kids", []):
-                    kid.update({"/V": value, "/DV": value})
-                found = True
-            if self._set_field_value(field.get("/Kids", []), name, value):
-                found = True
-        return found
-
-    def _apply_checkboxes(self, writer: PdfWriter, checkbox_states: dict):
-        acroform = writer._root_object.get("/AcroForm")
-        if not acroform:
-            return
-        root_fields = acroform.get("/Fields", [])
+    def _apply_checkboxes(self, field_map: dict, checkbox_states: dict):
         for name, state in checkbox_states.items():
-            value = "/Yes" if state else "/Off"
-            self._set_checkbox_value(root_fields, name, value)
+            entry = field_map.get(name)
+            if not entry:
+                continue
+            field = entry["field"]
+            widgets = entry.get("widgets", [])
+            on_value = self._get_checkbox_on_value(widgets)
+            value = on_value if state else NameObject("/Off")
+            field.update({NameObject("/V"): value})
+            for widget in widgets:
+                widget.update({NameObject("/AS"): value})
 
-    def _set_checkbox_value(self, fields, name, value):
-        found = False
-        for field in fields:
-            if field.get("/T") == name:
-                field.update({"/V": value})
-                for kid in field.get("/Kids", []):
-                    kid.update({"/V": value, "/AS": value})
-                found = True
-            if self._set_checkbox_value(field.get("/Kids", []), name, value):
-                found = True
-        return found
+    def _get_checkbox_on_value(self, widgets):
+        for widget in widgets:
+            ap = widget.get("/AP")
+            if not ap:
+                continue
+            normal = ap.get("/N")
+            if not normal:
+                continue
+            for key in normal.keys():
+                if str(key) != "/Off":
+                    return NameObject(str(key))
+        return NameObject("/Yes")
+
+    def _extract_fields(self, reader: PdfReader):
+        root = reader.trailer.get("/Root", {})
+        acroform = root.get("/AcroForm")
+        fields = acroform.get("/Fields", []) if acroform else []
+        field_map = {}
+
+        def walk(nodes):
+            for node in nodes:
+                name = node.get("/T")
+                name_str = None
+                if isinstance(name, (NameObject, TextStringObject, str)):
+                    name_str = str(name)
+                entry = None
+                if name_str:
+                    entry = field_map.setdefault(
+                        name_str, {"field": node, "widgets": []}
+                    )
+                if node.get("/Subtype") == "/Widget" and entry is not None:
+                    entry["widgets"].append(node)
+                kids = node.get("/Kids", [])
+                if entry is not None:
+                    for kid in kids:
+                        if kid.get("/Subtype") == "/Widget":
+                            entry["widgets"].append(kid)
+                if kids:
+                    walk(kids)
+
+        walk(fields)
+        return acroform, field_map
