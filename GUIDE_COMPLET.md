@@ -6,7 +6,8 @@
 - Python 3.11 (pour usage développeur)
 
 ### Lancement développeur
-1. Placez le template PDF : `Templates/bon de commande V1.pdf`
+1. Placez le template PDF (optionnel, pour copie automatique au premier démarrage) :
+   `Templates/bon de commande V1.pdf`
 2. Installez les dépendances :
    ```bash
    pip install -r requirements.txt
@@ -31,10 +32,10 @@
 
 ## 3. Règles métier appliquées
 ### Template PDF
-- Template requis : `Templates/bon de commande V1.pdf`
-- Chemin fiable :
-  - En dev : dossier du projet (`main.py`)
-  - En prod (PyInstaller) : dossier de l'exécutable
+- Template requis (source de vérité) : `%LOCALAPPDATA%\BDC Generator\Templates\bon de commande V1.pdf`
+- Le template est conservé même après désinstallation de l'application.
+- Si un template est présent dans le dossier app (`Templates/bon de commande V1.pdf`),
+  il est copié automatiquement dans le dossier utilisateur au démarrage.
 - Les boutons **Ouvrir le dossier Templates** et **Choisir un template…** permettent de corriger rapidement.
 - `NeedAppearances` activé (Adobe Reader)
 - **Ne jamais aplatir** le PDF (formulaire éditable)
