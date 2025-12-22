@@ -2,15 +2,15 @@ name: Build BDC Generator
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ "main", "master" ]
   pull_request:
-    branches: [ main, master ]
+    branches: [ "main", "master" ]
   workflow_dispatch:
 
 jobs:
   build-windows:
     runs-on: windows-latest
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -19,118 +19,146 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
       - name: Install dependencies
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
+
+          # Force GUI deps (avoid "ModuleNotFoundError: PySide6")
           python -m pip install "PySide6==6.6.3" "shiboken6==6.6.3"
+
+          # Force PyInstaller (avoid "pyinstaller not recognized")
+          python -m pip install "pyinstaller>=6.0"
+
           python -m pip show PySide6
+          python -m pip show shiboken6
+          python -m pip show pyinstaller
+
           python -c "import PySide6; print('PySide6 version:', PySide6.__version__)"
+          python -c "import PyInstaller; import sys; print('PyInstaller OK, python:', sys.version)"
+
           python -m pip freeze
 
-
-      - name: Create required directories
-        run: |
-          if (-not (Test-Path "hooks")) { New-Item -ItemType Directory -Path "hooks" }
-          if (-not (Test-Path "scripts")) { New-Item -ItemType Directory -Path "scripts" }
+      - name: Validate required files
         shell: pwsh
-
-      - name: Verify PySide6 installation
         run: |
-          python -c "import PySide6; print('PySide6 version:', PySide6.__version__)"
-          python -c "import PySide6, pathlib; p=pathlib.Path(PySide6.__file__).parent; print('PySide6 at:', p); qt_bin=p/'Qt'/'bin'; print('Qt bin:', qt_bin); print('Qt bin exists:', qt_bin.exists())"
+          $ErrorActionPreference = "Stop"
 
-      - name: Build with PyInstaller
+          if (-not (Test-Path "main.py")) { throw "main.py not found at repo root" }
+          if (-not (Test-Path "hooks/runtime_qt_path.py")) { throw "hooks/runtime_qt_path.py not found" }
+          if (-not (Test-Path "scripts/copy_qt_runtime.py")) { throw "scripts/copy_qt_runtime.py not found" }
+
+          # Optional but recommended (template)
+          if (-not (Test-Path "Templates/bon de commande V1.pdf")) {
+            Write-Host "WARNING: Templates/bon de commande V1.pdf not found (build can still succeed but app may fail at runtime)."
+          }
+
+      - name: Diagnose PySide6 Qt runtime on runner
+        shell: pwsh
         run: |
-          pyinstaller --noconfirm --clean --onedir --windowed --name "BDC Generator" ^
-            --add-data "Templates;Templates" ^
-            --collect-all PySide6 ^
-            --collect-all shiboken6 ^
-            --collect-binaries PySide6 ^
-            --collect-binaries shiboken6 ^
-            --runtime-hook hooks/runtime_qt_path.py ^
-            --hidden-import=PySide6.QtCore ^
-            --hidden-import=PySide6.QtGui ^
-            --hidden-import=PySide6.QtWidgets ^
+          $ErrorActionPreference = "Stop"
+          python -c "import PySide6, pathlib; p=pathlib.Path(PySide6.__file__).resolve().parent; qt=p/'Qt'/'bin'; print('PySide6 at:', p); print('Qt bin:', qt); print('Qt bin exists:', qt.exists()); print('Qt6Core sample:', [x.name for x in list(qt.glob('Qt6Core*.dll'))[:5]]); print('Qt6 dll sample:', [x.name for x in list(qt.glob('Qt6*.dll'))[:10]])"
+
+      - name: Build with PyInstaller (onedir)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          python -m PyInstaller --noconfirm --clean --onedir --windowed --name "BDC Generator" `
+            --add-data "Templates;Templates" `
+            --collect-all PySide6 `
+            --collect-all shiboken6 `
+            --collect-binaries PySide6 `
+            --collect-binaries shiboken6 `
+            --runtime-hook "hooks/runtime_qt_path.py" `
+            --hidden-import "PySide6.QtCore" `
+            --hidden-import "PySide6.QtGui" `
+            --hidden-import "PySide6.QtWidgets" `
             main.py
-        shell: cmd
 
       - name: Debug - List dist contents before Qt copy
         shell: pwsh
         run: |
-          Write-Host "=== Contents of dist/BDC Generator ==="
-          Get-ChildItem -Path "dist/BDC Generator" -Recurse | Select-Object FullName | Format-Table -AutoSize
-          Write-Host "`n=== Looking for Qt DLLs before copy ==="
-          $qtDlls = Get-ChildItem -Path "dist/BDC Generator" -Recurse -Filter "Qt6*.dll" -ErrorAction SilentlyContinue
-          if ($qtDlls) {
-            $qtDlls | ForEach-Object { Write-Host "Found: $($_.FullName)" }
+          $ErrorActionPreference = "Continue"
+
+          $distDir = Join-Path $PWD "dist\BDC Generator"
+          Write-Host "=== distDir: $distDir ==="
+
+          if (Test-Path $distDir) {
+            Write-Host "=== Looking for Qt DLLs before copy ==="
+            $qtDlls = Get-ChildItem -Path $distDir -Recurse -Filter "Qt6*.dll" -ErrorAction SilentlyContinue
+            if ($qtDlls) {
+              $qtDlls | Select-Object -First 30 | ForEach-Object { Write-Host "Found: $($_.FullName)" }
+            } else {
+              Write-Host "No Qt6 DLLs found yet (expected sometimes before manual copy)"
+            }
           } else {
-            Write-Host "No Qt6 DLLs found yet (expected before Qt copy)"
+            Write-Host "dist folder not found yet."
           }
 
-      - name: Copy Qt runtime DLLs
+      - name: Force copy Qt runtime into dist
+        shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           python scripts/copy_qt_runtime.py "dist/BDC Generator"
-        shell: cmd
 
-      - name: Debug - List dist contents after Qt copy
+      - name: Verify required DLLs are present (post-copy)
         shell: pwsh
         run: |
-          Write-Host "`n=== Contents of dist/BDC Generator after Qt copy ==="
-          Get-ChildItem -Path "dist/BDC Generator" -Recurse | Select-Object FullName | Format-Table -AutoSize
+          $ErrorActionPreference = "Stop"
 
-      - name: Verify all required DLLs are present
-        shell: pwsh
-        run: |
-          $distDir = Join-Path $PWD "dist/BDC Generator"
-          if (-not (Test-Path $distDir)) { 
-            throw "dist folder not found: $distDir" 
+          $distDir = Join-Path $PWD "dist\BDC Generator"
+          if (-not (Test-Path $distDir)) { throw "dist folder not found: $distDir" }
+
+          Write-Host "=== Verifying required DLLs (recursive) ==="
+
+          $qtCore = Get-ChildItem -Path $distDir -Recurse -Filter "Qt6Core*.dll" -ErrorAction SilentlyContinue
+          if (-not $qtCore) {
+            Write-Host "Tree dist (top 200):"
+            Get-ChildItem -Path $distDir -Recurse | Select-Object -First 200 FullName
+            throw "Missing Qt6Core*.dll in $distDir"
           }
-          
-          Write-Host "`n=== Verifying required DLLs ==="
-          
-          # Qt DLLs
-          $qtDlls = Get-ChildItem -Path $distDir -Recurse -Filter "Qt6*.dll" -ErrorAction SilentlyContinue
-          if (-not $qtDlls) { 
-            Write-Host "ERROR: No Qt6 DLLs found!"
-            Write-Host "Expected location: $distDir\_internal\PySide6\Qt\bin\"
-            throw "Missing required DLLs matching: Qt6*.dll" 
-          }
-          Write-Host "✓ Found Qt6 DLLs:"
-          $qtDlls | ForEach-Object { Write-Host "  - $($_.Name) at $($_.FullName)" }
-          
-          # Shiboken DLLs
-          $shibokenDlls = Get-ChildItem -Path $distDir -Recurse -Filter "shiboken6*.dll" -ErrorAction SilentlyContinue
-          if (-not $shibokenDlls) { 
-            throw "Missing required DLLs matching: shiboken6*.dll" 
-          }
-          Write-Host "`n✓ Found Shiboken6 DLLs:"
-          $shibokenDlls | ForEach-Object { Write-Host "  - $($_.Name)" }
-          
-          # MSVC Runtime (optional, may be in system)
-          $vcDlls = Get-ChildItem -Path $distDir -Recurse -Filter "vcruntime140*.dll" -ErrorAction SilentlyContinue
-          if ($vcDlls) {
-            Write-Host "`n✓ Found MSVC Runtime DLLs:"
-            $vcDlls | ForEach-Object { Write-Host "  - $($_.Name)" }
-          } else {
-            Write-Host "`n⚠ MSVC Runtime DLLs not found in dist (may use system DLLs)"
-          }
+          Write-Host "✓ Found Qt6Core: $($qtCore[0].FullName)"
+
+          $shiboken = Get-ChildItem -Path $distDir -Recurse -Filter "shiboken6*.dll" -ErrorAction SilentlyContinue
+          if (-not $shiboken) { throw "Missing shiboken6*.dll in $distDir" }
+          Write-Host "✓ Found shiboken6 DLLs: $($shiboken.Count)"
 
       - name: Create portable ZIP
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           $version = "1.0.0"
           $zipName = "BDC_Generator_v${version}_Windows.zip"
-          Compress-Archive -Path "dist/BDC Generator/*" -DestinationPath $zipName -Force
+          $distDir = Join-Path $PWD "dist\BDC Generator"
+
+          if (-not (Test-Path $distDir)) { throw "dist folder not found: $distDir" }
+
+          if (Test-Path $zipName) { Remove-Item $zipName -Force }
+          Compress-Archive -Path "$distDir\*" -DestinationPath $zipName -Force
+
           Write-Host "Created: $zipName"
           $size = (Get-Item $zipName).Length / 1MB
           Write-Host "Size: $([math]::Round($size, 2)) MB"
 
-      - name: Upload artifact
+      - name: Upload artifact (ZIP)
         uses: actions/upload-artifact@v4
         with:
           name: BDC-Generator-Windows
-          path: BDC_Generator_v*.zip
+          path: BDC_Generator_v*_Windows.zip
           retention-days: 30
+
+      # Optionnel mais ultra utile pour debug si ça plante encore :
+      - name: Upload dist for debugging (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug_dist
+          path: dist/**
+          retention-days: 7
