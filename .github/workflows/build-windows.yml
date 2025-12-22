@@ -12,13 +12,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Verify template exists
-        shell: pwsh
+      - name: Validate template exists
+        shell: bash
         run: |
-          $template = Join-Path $PWD "Templates/bon de commande V1.pdf"
-          if (-not (Test-Path $template)) {
-            throw "Missing required template: $template"
-          }
+          if [ ! -f "Templates/bon de commande V1.pdf" ]; then
+            echo "Missing required template."
+            echo "Expected path: Templates/bon de commande V1.pdf"
+            exit 1
+          fi
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -32,30 +33,31 @@ jobs:
           python -m pip install pyinstaller
 
       - name: Build portable app
-        shell: pwsh
         run: |
-          pyinstaller --noconfirm --clean --onedir --windowed --name "BDC Generator" `
-            --add-data "Templates;Templates" `
-            --collect-all PySide6 `
-            --collect-all shiboken6 `
-            --collect-binaries PySide6 `
-            --collect-binaries shiboken6 `
-            --runtime-hook hooks/runtime_qt_path.py `
-            --hidden-import=winrt `
-            --hidden-import=winrt.windows.media.ocr `
-            --hidden-import=winrt.windows.graphics.imaging `
-            --hidden-import=winrt.windows.storage.streams `
+          pyinstaller --noconfirm --clean --onedir --windowed --name "BDC Generator" ^
+            --add-data "Templates;Templates" ^
+            --collect-all PySide6 ^
+            --collect-all shiboken6 ^
+            --collect-binaries PySide6 ^
+            --collect-binaries shiboken6 ^
+            --runtime-hook hooks\runtime_qt_path.py ^
+            --hidden-import=winrt ^
+            --hidden-import=winrt.windows.media.ocr ^
+            --hidden-import=winrt.windows.graphics.imaging ^
+            --hidden-import=winrt.windows.storage.streams ^
             main.py
 
-      - name: Verify Qt DLLs are packaged
+      - name: Verify Qt and Shiboken DLLs are packaged
         shell: pwsh
         run: |
           $distDir = Join-Path $PWD "dist/BDC Generator"
           if (-not (Test-Path $distDir)) { throw "dist folder not found: $distDir" }
           $qt = Get-ChildItem -Path $distDir -Recurse -Filter "Qt6*.dll" -ErrorAction SilentlyContinue
-          if (-not $qt) { throw "Missing Qt6 DLLs in $distDir" }
+          if (-not $qt) { throw "Missing required DLLs matching: Qt6*.dll" }
+          $qt | ForEach-Object { Write-Host "Found Qt6 DLL at $($_.FullName)" }
           $shiboken = Get-ChildItem -Path $distDir -Recurse -Filter "shiboken6*.dll" -ErrorAction SilentlyContinue
-          if (-not $shiboken) { throw "Missing shiboken6 DLLs in $distDir" }
+          if (-not $shiboken) { throw "Missing required DLLs matching: shiboken6*.dll" }
+          $shiboken | ForEach-Object { Write-Host "Found shiboken6 DLL at $($_.FullName)" }
 
       - name: Smoke test executable
         shell: pwsh
@@ -66,23 +68,19 @@ jobs:
           Start-Sleep -Seconds 5
           if (-not $process.HasExited) {
             Stop-Process -Id $process.Id -Force
-          } else {
-            exit $process.ExitCode
+            exit 0
           }
+          exit $process.ExitCode
 
       - name: Create release zip
         shell: pwsh
         run: |
           $releaseDir = Join-Path $PWD "release_zip"
-          New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
-          Copy-Item -Path "dist/BDC Generator" -Destination $releaseDir -Recurse
-          $readmes = @("README.md", "README_Installation.txt", "README_PACKAGING.md")
-          foreach ($readme in $readmes) {
-            if (Test-Path $readme) {
-              Copy-Item -Path $readme -Destination $releaseDir
-            }
-          }
-          Compress-Archive -Path (Join-Path $releaseDir "*") -DestinationPath "BDC_Generator.zip" -Force
+          if (Test-Path $releaseDir) { Remove-Item -Recurse -Force $releaseDir }
+          New-Item -ItemType Directory -Path $releaseDir | Out-Null
+          Copy-Item -Recurse -Path "dist/BDC Generator" -Destination $releaseDir
+          Copy-Item -Path "README_Installation.txt","README_PACKAGING.md" -Destination $releaseDir
+          Compress-Archive -Path "$releaseDir/*" -DestinationPath "BDC_Generator.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

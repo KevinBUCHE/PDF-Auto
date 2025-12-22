@@ -52,7 +52,7 @@ jobs:
 
       - name: Build portable app
         run: |
-          pyinstaller --onedir --windowed --name "BDC Generator" --add-data "Templates;Templates" --collect-all PySide6 --collect-all shiboken6 --collect-binaries PySide6 --collect-binaries shiboken6 --runtime-hook hooks/runtime_qt_path.py --hidden-import=winrt --hidden-import=winrt.windows.media.ocr --hidden-import=winrt.windows.graphics.imaging --hidden-import=winrt.windows.storage.streams main.py
+          pyinstaller --onedir --windowed --name "BDC Generator" --add-data "Templates;Templates" --collect-all PySide6 --collect-all shiboken6 --runtime-hook hooks/runtime_qt_path.py --hidden-import=winrt --hidden-import=winrt.windows.media.ocr --hidden-import=winrt.windows.graphics.imaging --hidden-import=winrt.windows.storage.streams main.py
 
       - name: Verify Qt and MSVC DLLs are packaged
         shell: pwsh
@@ -63,6 +63,7 @@ jobs:
           foreach ($pattern in $required) {
             $found = Get-ChildItem -Path $distDir -Recurse -Filter $pattern -ErrorAction SilentlyContinue
             if (-not $found) { throw "Missing required DLLs matching: $pattern" }
+            $found | ForEach-Object { Write-Host "Found $pattern at $($_.FullName)" }
           }
 
       - name: Smoke test executable
