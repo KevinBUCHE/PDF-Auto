@@ -1,0 +1,91 @@
+name: Build Windows Portable
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify template exists
+        shell: pwsh
+        run: |
+          $template = Join-Path $PWD "Templates/bon de commande V1.pdf"
+          if (-not (Test-Path $template)) {
+            throw "Missing required template: $template"
+          }
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller
+
+      - name: Build portable app
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --onedir --windowed --name "BDC Generator" `
+            --add-data "Templates;Templates" `
+            --collect-all PySide6 `
+            --collect-all shiboken6 `
+            --collect-binaries PySide6 `
+            --collect-binaries shiboken6 `
+            --runtime-hook hooks/runtime_qt_path.py `
+            --hidden-import=winrt `
+            --hidden-import=winrt.windows.media.ocr `
+            --hidden-import=winrt.windows.graphics.imaging `
+            --hidden-import=winrt.windows.storage.streams `
+            main.py
+
+      - name: Verify Qt DLLs are packaged
+        shell: pwsh
+        run: |
+          $distDir = Join-Path $PWD "dist/BDC Generator"
+          if (-not (Test-Path $distDir)) { throw "dist folder not found: $distDir" }
+          $qt = Get-ChildItem -Path $distDir -Recurse -Filter "Qt6*.dll" -ErrorAction SilentlyContinue
+          if (-not $qt) { throw "Missing Qt6 DLLs in $distDir" }
+          $shiboken = Get-ChildItem -Path $distDir -Recurse -Filter "shiboken6*.dll" -ErrorAction SilentlyContinue
+          if (-not $shiboken) { throw "Missing shiboken6 DLLs in $distDir" }
+
+      - name: Smoke test executable
+        shell: pwsh
+        run: |
+          $exePath = Join-Path $PWD "dist/BDC Generator/BDC Generator.exe"
+          if (-not (Test-Path $exePath)) { throw "Executable not found: $exePath" }
+          $process = Start-Process -FilePath $exePath -PassThru
+          Start-Sleep -Seconds 5
+          if (-not $process.HasExited) {
+            Stop-Process -Id $process.Id -Force
+          } else {
+            exit $process.ExitCode
+          }
+
+      - name: Create release zip
+        shell: pwsh
+        run: |
+          $releaseDir = Join-Path $PWD "release_zip"
+          New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
+          Copy-Item -Path "dist/BDC Generator" -Destination $releaseDir -Recurse
+          $readmes = @("README.md", "README_Installation.txt", "README_PACKAGING.md")
+          foreach ($readme in $readmes) {
+            if (Test-Path $readme) {
+              Copy-Item -Path $readme -Destination $releaseDir
+            }
+          }
+          Compress-Archive -Path (Join-Path $releaseDir "*") -DestinationPath "BDC_Generator.zip" -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BDC_Generator
+          path: BDC_Generator.zip

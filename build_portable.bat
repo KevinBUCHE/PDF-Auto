@@ -9,6 +9,8 @@ pyinstaller --noconfirm --clean --onedir --windowed --name "BDC Generator" ^
   --add-data "Templates;Templates" ^
   --collect-all PySide6 ^
   --collect-all shiboken6 ^
+  --collect-binaries PySide6 ^
+  --collect-binaries shiboken6 ^
   --runtime-hook hooks\runtime_qt_path.py ^
   --hidden-import=winrt ^
   --hidden-import=winrt.windows.media.ocr ^
