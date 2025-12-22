@@ -2,18 +2,28 @@ import os
 import sys
 from pathlib import Path
 
-def _add(p: Path):
-    if p and p.exists():
-        os.environ["PATH"] = str(p) + os.pathsep + os.environ.get("PATH", "")
+
+def _prepend_path(p: Path) -> None:
+    if not p:
+        return
+    try:
+        p = p.resolve()
+    except Exception:
+        p = Path(str(p))
+    if not p.exists():
+        return
+    current = os.environ.get("PATH", "")
+    parts = current.split(os.pathsep) if current else []
+    sp = str(p)
+    if sp in parts:
+        return
+    os.environ["PATH"] = sp + (os.pathsep + current if current else "")
+
 
 if getattr(sys, "frozen", False):
-    base = Path(sys.executable).parent
-
-    # racine
-    _add(base)
-
-    # PyInstaller onedir met souvent les libs ici
-    _add(base / "_internal")
-    _add(base / "_internal" / "PySide6")
-    _add(base / "_internal" / "PySide6" / "Qt" / "bin")
-    _add(base / "_internal" / "PySide6" / "Qt" / "plugins")
+    base = Path(sys.executable).resolve().parent
+    _prepend_path(base)
+    _prepend_path(base / "_internal")
+    _prepend_path(base / "_internal" / "PySide6")
+    _prepend_path(base / "_internal" / "PySide6" / "Qt" / "bin")
+    _prepend_path(base / "_internal" / "PySide6" / "Qt" / "plugins")
