@@ -3,18 +3,22 @@ Diagnostic PySide6 / Qt (CI-safe, ASCII only)
 
 But:
 - Verifier que PySide6 est installable/importable
-- Verifier que les DLL Qt6 existent dans PySide6/Qt/bin
-- Verifier Shiboken6
-- Verifier imports PySide6.QtCore/QtGui/QtWidgets
+- Verifier que les DLL Qt6 existent
+- Copier les DLL Qt6 et plugins dans le dist PyInstaller
 
 IMPORTANT:
-- Sortie ASCII uniquement (pas de ✓ / emojis) pour eviter UnicodeEncodeError sur Windows CP1252.
+- Sortie ASCII uniquement (pas de caracteres Unicode) pour eviter UnicodeEncodeError sur Windows CP1252.
 """
 
 from __future__ import annotations
 
+import shutil
 import sys
 from pathlib import Path
+from typing import Iterable
+
+
+CRITICAL_DLLS = ["Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll"]
 
 
 def _safe_io_utf8() -> None:
@@ -35,143 +39,228 @@ def _section(title: str) -> None:
     print("=" * 70)
 
 
-def test_pyside6_import() -> bool:
-    _section("TEST 1: Import PySide6")
+def _qlibraryinfo_path(path_enum: object) -> str:
     try:
-        import PySide6  # type: ignore
+        from PySide6.QtCore import QLibraryInfo  # type: ignore
 
-        print(f"OK: PySide6 version   : {getattr(PySide6, '__version__', 'unknown')}")
-        print(f"OK: PySide6 location  : {getattr(PySide6, '__file__', 'unknown')}")
-        return True
-    except Exception as e:
-        print(f"FAIL: Import PySide6  : {type(e).__name__}: {e}")
-        return False
+        if hasattr(QLibraryInfo, "path"):
+            return QLibraryInfo.path(path_enum) or ""
+        if hasattr(QLibraryInfo, "location"):
+            return QLibraryInfo.location(path_enum) or ""
+    except Exception:
+        return ""
+    return ""
 
 
-def test_qt_dlls() -> bool:
-    _section("TEST 2: Verification DLLs Qt (Qt6*.dll)")
+def get_qt_bins_candidates(pyside_root: Path) -> list[Path]:
+    candidates: list[Path] = []
 
     try:
-        import PySide6  # type: ignore
+        from PySide6.QtCore import QLibraryInfo  # type: ignore
 
-        pyside_root = Path(PySide6.__file__).resolve().parent  # type: ignore
-        qt_bin = pyside_root / "Qt" / "bin"
+        qlib_bins = _qlibraryinfo_path(QLibraryInfo.LibraryPath.BinariesPath)
+        if qlib_bins:
+            candidates.append(Path(qlib_bins))
+    except Exception:
+        pass
 
-        print(f"INFO: PySide6 root    : {pyside_root}")
-        print(f"INFO: Qt bin          : {qt_bin}")
+    candidates.extend(
+        [
+            pyside_root / "Qt" / "bin",
+            pyside_root / "Qt" / "lib",
+        ]
+    )
 
-        if not qt_bin.exists():
-            print(f"FAIL: Qt bin missing  : {qt_bin}")
-            return False
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for candidate in candidates:
+        resolved = candidate.resolve() if candidate.exists() else candidate
+        if resolved not in seen:
+            seen.add(resolved)
+            unique.append(candidate)
 
-        print("OK: Qt bin exists")
+    return unique
 
-        qt_dlls = sorted(qt_bin.glob("Qt6*.dll"))
-        if not qt_dlls:
-            print("FAIL: No Qt6*.dll found in Qt/bin")
-            return False
 
-        print(f"OK: Found {len(qt_dlls)} Qt6 DLL(s) (showing up to 15):")
-        for dll in qt_dlls[:15]:
+def get_qt_plugins_candidates(pyside_root: Path) -> list[Path]:
+    candidates: list[Path] = []
+
+    try:
+        from PySide6.QtCore import QLibraryInfo  # type: ignore
+
+        qlib_plugins = _qlibraryinfo_path(QLibraryInfo.LibraryPath.PluginsPath)
+        if qlib_plugins:
+            candidates.append(Path(qlib_plugins))
+    except Exception:
+        pass
+
+    candidates.append(pyside_root / "Qt" / "plugins")
+
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for candidate in candidates:
+        resolved = candidate.resolve() if candidate.exists() else candidate
+        if resolved not in seen:
+            seen.add(resolved)
+            unique.append(candidate)
+
+    return unique
+
+
+def _find_critical_dlls(search_roots: Iterable[Path]) -> dict[str, Path]:
+    found: dict[str, Path] = {}
+    for root in search_roots:
+        if not root.exists():
+            continue
+        for dll_name in CRITICAL_DLLS:
+            if dll_name in found:
+                continue
             try:
-                size_mb = dll.stat().st_size / (1024 * 1024)
-                print(f"  - {dll.name} ({size_mb:.2f} MB)")
+                match = next(root.rglob(dll_name), None)
             except Exception:
-                print(f"  - {dll.name}")
-
-        if len(qt_dlls) > 15:
-            print(f"  ... plus {len(qt_dlls) - 15} other(s)")
-
-        # Critical DLLs
-        critical = ["Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll"]
-        print("\nINFO: Critical DLLs:")
-        all_ok = True
-        for name in critical:
-            p = qt_bin / name
-            if p.exists():
-                size_mb = p.stat().st_size / (1024 * 1024)
-                print(f"  OK  : {name} ({size_mb:.2f} MB)")
-            else:
-                print(f"  FAIL: {name} missing")
-                all_ok = False
-
-        return all_ok
-
-    except Exception as e:
-        print(f"FAIL: Qt DLL check    : {type(e).__name__}: {e}")
-        return False
+                match = None
+            if match is not None:
+                found[dll_name] = match
+        if len(found) == len(CRITICAL_DLLS):
+            break
+    return found
 
 
-def test_shiboken6() -> bool:
-    _section("TEST 3: Verification Shiboken6")
-    try:
-        import shiboken6  # type: ignore
-
-        print(f"OK: Shiboken6 version : {getattr(shiboken6, '__version__', 'unknown')}")
-        root = Path(shiboken6.__file__).resolve().parent  # type: ignore
-        print(f"OK: Shiboken6 path    : {root}")
-
-        dlls = sorted(root.glob("shiboken6*.dll"))
-        if dlls:
-            print(f"OK: Found {len(dlls)} shiboken DLL(s):")
-            for d in dlls:
-                print(f"  - {d.name}")
-        else:
-            print("WARN: No shiboken6*.dll in shiboken6 folder (may be bundled under PySide6)")
-        return True
-
-    except Exception as e:
-        print(f"FAIL: Import shiboken6: {type(e).__name__}: {e}")
-        return False
+def find_qt_bin_dir(candidates: Iterable[Path]) -> tuple[Path | None, list[Path]]:
+    checked: list[Path] = []
+    for candidate in candidates:
+        checked.append(candidate)
+        if not candidate.exists():
+            continue
+        if all((candidate / dll).exists() for dll in CRITICAL_DLLS):
+            return candidate, checked
+    return None, checked
 
 
-def test_qt_modules() -> bool:
-    _section("TEST 4: Import Qt modules")
-    modules = ["PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets"]
-    all_ok = True
+def _copy_qt_dlls(source_dirs: Iterable[Path], target_bin: Path) -> int:
+    copied = 0
+    seen: set[str] = set()
+    for source_dir in source_dirs:
+        if not source_dir.exists():
+            continue
+        for dll in source_dir.glob("Qt6*.dll"):
+            if dll.name in seen:
+                continue
+            target = target_bin / dll.name
+            target_bin.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(dll, target)
+            seen.add(dll.name)
+            copied += 1
+    return copied
 
-    for mod in modules:
-        try:
-            __import__(mod)
-            print(f"OK: {mod}")
-        except Exception as e:
-            print(f"FAIL: {mod} : {type(e).__name__}: {e}")
-            all_ok = False
 
-    return all_ok
+def _copy_plugins(plugin_dir: Path, target_plugins: Path) -> int:
+    if not plugin_dir.exists():
+        return 0
+    shutil.copytree(plugin_dir, target_plugins, dirs_exist_ok=True)
+    count = sum(1 for _ in target_plugins.rglob("*"))
+    return count
 
 
 def main() -> None:
     _safe_io_utf8()
 
-    print("\n" + "=" * 70)
-    print("DIAGNOSTIC INSTALLATION PySide6 / Qt".center(70))
-    print("=" * 70)
+    _section("DIAGNOSTIC INSTALLATION PySide6 / Qt")
 
-    results = {
-        "Import PySide6": test_pyside6_import(),
-        "Qt DLLs": test_qt_dlls(),
-        "Shiboken6": test_shiboken6(),
-        "Qt modules": test_qt_modules(),
-    }
+    try:
+        import PySide6  # type: ignore
 
-    _section("SUMMARY")
-    for name, ok in results.items():
-        status = "OK" if ok else "FAIL"
-        print(f"{name:20} : {status}")
+        pyside_root = Path(PySide6.__file__).resolve().parent  # type: ignore
+        print(f"INFO: PySide6 version : {getattr(PySide6, '__version__', 'unknown')}")
+        print(f"INFO: PySide6 root    : {pyside_root}")
+    except Exception as exc:
+        print(f"FAIL: Import PySide6  : {type(exc).__name__}: {exc}")
+        raise SystemExit(1)
 
-    all_ok = all(results.values())
-    print("\n" + "=" * 70)
-    if all_ok:
-        print("ALL TESTS PASSED - You can run PyInstaller.".center(70))
-        exit_code = 0
-    else:
-        print("SOME TESTS FAILED - Fix dependencies before building.".center(70))
-        print("Hint: python -m pip install --force-reinstall PySide6 shiboken6".center(70))
-        exit_code = 1
-    print("=" * 70 + "\n")
+    if len(sys.argv) < 2:
+        print("FAIL: Missing dist path argument.")
+        print("Usage: python scripts/copy_qt_runtime.py <dist_dir>")
+        raise SystemExit(1)
 
-    raise SystemExit(exit_code)
+    dist_dir = Path(sys.argv[1]).resolve()
+    target_bin = dist_dir / "_internal" / "PySide6" / "Qt" / "bin"
+    target_plugins = dist_dir / "_internal" / "PySide6" / "Qt" / "plugins"
+
+    print(f"INFO: Dist target     : {dist_dir}")
+    print(f"INFO: Target bin dir  : {target_bin}")
+
+    candidates = get_qt_bins_candidates(pyside_root)
+    print("INFO: Qt bin candidates:")
+    for candidate in candidates:
+        print(f"  - {candidate}")
+
+    qt_bin, checked = find_qt_bin_dir(candidates)
+    for candidate in checked:
+        if candidate.exists():
+            print(f"INFO: Checked         : {candidate} (exists)")
+        else:
+            print(f"INFO: Checked         : {candidate} (missing)")
+
+    search_roots = [pyside_root, pyside_root.parent]
+    print("INFO: Recursive search roots:")
+    for root in search_roots:
+        print(f"  - {root}")
+
+    found_critical = _find_critical_dlls(search_roots)
+
+    missing = [dll for dll in CRITICAL_DLLS if dll not in found_critical]
+    if missing:
+        print("FAIL: Missing critical Qt DLLs:")
+        for dll in missing:
+            print(f"  - {dll}")
+        raise SystemExit(1)
+
+    if qt_bin is None:
+        qt_bin = found_critical[CRITICAL_DLLS[0]].parent
+        print(f"WARN: No bin dir with all critical DLLs found; using {qt_bin}")
+
+    print(f"INFO: Selected Qt bin : {qt_bin}")
+
+    source_dirs = [qt_bin]
+    for dll_path in found_critical.values():
+        source_dirs.append(dll_path.parent)
+
+    source_dirs_unique: list[Path] = []
+    seen_dirs: set[Path] = set()
+    for source in source_dirs:
+        resolved = source.resolve() if source.exists() else source
+        if resolved not in seen_dirs:
+            seen_dirs.add(resolved)
+            source_dirs_unique.append(source)
+
+    copied_count = _copy_qt_dlls(source_dirs_unique, target_bin)
+    print(f"INFO: Copied Qt DLLs  : {copied_count}")
+
+    for dll_name in CRITICAL_DLLS:
+        target_path = target_bin / dll_name
+        if target_path.exists():
+            size_mb = target_path.stat().st_size / (1024 * 1024)
+            print(f"OK: {dll_name} copied ({size_mb:.2f} MB)")
+        else:
+            print(f"FAIL: {dll_name} not copied")
+            raise SystemExit(1)
+
+    plugins_candidates = get_qt_plugins_candidates(pyside_root)
+    print("INFO: Qt plugins candidates:")
+    for candidate in plugins_candidates:
+        print(f"  - {candidate}")
+
+    plugins_copied = 0
+    for candidate in plugins_candidates:
+        if candidate.exists():
+            plugins_copied = _copy_plugins(candidate, target_plugins)
+            print(f"INFO: Copied plugins  : {plugins_copied} from {candidate}")
+            break
+
+    if plugins_copied == 0:
+        print("INFO: No Qt plugins copied (not found)")
+
+    print("INFO: Qt runtime copy complete")
 
 
 if __name__ == "__main__":
