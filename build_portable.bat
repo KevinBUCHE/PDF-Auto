@@ -5,19 +5,46 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 python -m pip install pyinstaller
 
-pyinstaller --noconfirm --clean --onedir --windowed --name "BDC Generator" ^
-  --add-data "Templates;Templates" ^
-  --collect-all PySide6 ^
-  --collect-all shiboken6 ^
-  --collect-binaries PySide6 ^
-  --collect-binaries shiboken6 ^
-  --runtime-hook hooks\runtime_qt_path.py ^
-  --hidden-import=winrt ^
-  --hidden-import=winrt.windows.media.ocr ^
-  --hidden-import=winrt.windows.graphics.imaging ^
-  --hidden-import=winrt.windows.storage.streams ^
-  main.py
+echo %INFO%[5/6] Build PyInstaller (avec Qt runtime)...%RESET%
+echo Ceci peut prendre 2-3 minutes...
+echo.
 
-python scripts\\copy_qt_runtime.py "dist\\BDC Generator"
+pyinstaller ^
+    --name "BDC Generator" ^
+    --onedir ^
+    --windowed ^
+    --noconfirm ^
+    --clean ^
+    --add-data "Templates;Templates" ^
+    --collect-all PySide6 ^
+    --collect-all shiboken6 ^
+    --collect-binaries PySide6 ^
+    --collect-binaries shiboken6 ^
+    --runtime-hook hooks\runtime_qt_path.py ^
+    --hidden-import=PySide6.QtCore ^
+    --hidden-import=PySide6.QtGui ^
+    --hidden-import=PySide6.QtWidgets ^
+    main.py
+
+if errorlevel 1 (
+    echo.
+    echo %ERROR%[ERREUR] Build PyInstaller echoue%RESET%
+    pause
+    exit /b 1
+)
+
+echo %SUCCESS%Build PyInstaller termine%RESET%
+echo.
+
+REM Copier les DLLs Qt supplémentaires
+echo %INFO%[6/6] Copie des DLLs Qt...%RESET%
+python scripts\copy_qt_runtime.py "dist\BDC Generator"
+if errorlevel 1 (
+    echo %ERROR%[ERREUR] Copie Qt echouee%RESET%
+    pause
+    exit /b 1
+)
+echo %SUCCESS%DLLs Qt copiees%RESET%
+echo.
 
 endlocal
