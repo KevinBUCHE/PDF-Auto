@@ -41,6 +41,7 @@ jobs:
 
           python -c "import PySide6; print('PySide6 version:', PySide6.__version__)"
           python -c "import PyInstaller; import sys; print('PyInstaller OK, python:', sys.version)"
+          python -c "import fitz; print('PyMuPDF OK')"
 
           python -m pip freeze
 
@@ -83,12 +84,14 @@ jobs:
             --add-data "Templates;Templates" `
             --collect-all PySide6 `
             --collect-all shiboken6 `
+            --collect-all PyMuPDF `
             --collect-binaries PySide6 `
             --collect-binaries shiboken6 `
             --runtime-hook "hooks/runtime_qt_path.py" `
             --hidden-import "PySide6.QtCore" `
             --hidden-import "PySide6.QtGui" `
             --hidden-import "PySide6.QtWidgets" `
+            --hidden-import "fitz" `
             main.py
 
       - name: Debug - List dist contents before Qt copy

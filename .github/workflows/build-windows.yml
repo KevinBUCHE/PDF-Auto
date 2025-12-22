@@ -32,12 +32,17 @@ jobs:
           python -m pip install -r requirements.txt
           python -m pip install PySide6==6.6.3 PySide6_Essentials==6.6.3 PySide6_Addons==6.6.3 shiboken6==6.6.3 pyinstaller
 
+      - name: Verify PyMuPDF import
+        run: |
+          python -c "import fitz; print('PyMuPDF OK')"
+
       - name: Build portable app
         run: |
           python -m PyInstaller --noconfirm --clean --onedir --windowed --name "BDC Generator" ^
             --add-data "Templates;Templates" ^
             --collect-all PySide6 ^
             --collect-all shiboken6 ^
+            --collect-all PyMuPDF ^
             --collect-binaries PySide6 ^
             --collect-binaries shiboken6 ^
             --runtime-hook hooks\runtime_qt_path.py ^
@@ -45,6 +50,7 @@ jobs:
             --hidden-import=winrt.windows.media.ocr ^
             --hidden-import=winrt.windows.graphics.imaging ^
             --hidden-import=winrt.windows.storage.streams ^
+            --hidden-import=fitz ^
             main.py
 
       - name: Debug PySide6 Qt paths
