@@ -25,5 +25,6 @@ if getattr(sys, "frozen", False):
     _prepend_path(base)
     _prepend_path(base / "_internal")
     _prepend_path(base / "_internal" / "PySide6")
-    _prepend_path(base / "_internal" / "PySide6" / "Qt" / "bin")
-    _prepend_path(base / "_internal" / "PySide6" / "Qt" / "plugins")
+    qt_root = base / "_internal" / "PySide6" / "Qt"
+    _prepend_path(qt_root / "bin")
+    _prepend_path(qt_root / "plugins")
