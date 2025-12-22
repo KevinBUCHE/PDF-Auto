@@ -64,6 +64,11 @@ jobs:
           $ErrorActionPreference = "Stop"
           python -c "import PySide6, pathlib; p=pathlib.Path(PySide6.__file__).resolve().parent; qt=p/'Qt'/'bin'; print('PySide6 at:', p); print('Qt bin:', qt); print('Qt bin exists:', qt.exists()); print('Qt6Core sample:', [x.name for x in list(qt.glob('Qt6Core*.dll'))[:5]]); print('Qt6 dll sample:', [x.name for x in list(qt.glob('Qt6*.dll'))[:10]])"
 
+      - name: List scripts directory
+        shell: pwsh
+        run: |
+          dir scripts
+
       - name: Diagnose Qt (pre-build)
         shell: pwsh
         run: |
