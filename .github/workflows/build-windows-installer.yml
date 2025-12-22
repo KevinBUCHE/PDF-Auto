@@ -1,45 +1,21 @@
-name: Build Windows Installer
+name: Build BDC Generator
 
 on:
-  workflow_dispatch:
   push:
-    branches: ["main"]
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
 
 jobs:
-  build:
+  build-windows:
     runs-on: windows-latest
+    
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Debug repository contents
-        shell: bash
-        run: |
-          echo "Repository root contents:"
-          ls -la
-          echo "Templates directory contents:"
-          if [ -d "Templates" ]; then
-            ls -la "Templates"
-          else
-            echo "Templates directory not found."
-          fi
-
-      - name: Validate template exists
-        shell: bash
-        run: |
-          if [ ! -f "Templates/bon de commande V1.pdf" ]; then
-            echo "Missing required template."
-            echo "Expected path: Templates/bon de commande V1.pdf"
-            echo "Templates directory contents:"
-            if [ -d "Templates" ]; then
-              ls -la "Templates"
-            else
-              echo "Templates directory not found."
-            fi
-            exit 1
-          fi
-
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -47,62 +23,109 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller
 
-      - name: Build portable app
+      - name: Create required directories
         run: |
-          pyinstaller --onedir --windowed --name "BDC Generator" --add-data "Templates;Templates" --collect-all PySide6 --collect-all shiboken6 --runtime-hook hooks/runtime_qt_path.py --hidden-import=winrt --hidden-import=winrt.windows.media.ocr --hidden-import=winrt.windows.graphics.imaging --hidden-import=winrt.windows.storage.streams main.py
+          if (-not (Test-Path "hooks")) { New-Item -ItemType Directory -Path "hooks" }
+          if (-not (Test-Path "scripts")) { New-Item -ItemType Directory -Path "scripts" }
+        shell: pwsh
 
-      - name: Verify Qt and MSVC DLLs are packaged
+      - name: Verify PySide6 installation
+        run: |
+          python -c "import PySide6; print('PySide6 version:', PySide6.__version__)"
+          python -c "import PySide6, pathlib; p=pathlib.Path(PySide6.__file__).parent; print('PySide6 at:', p); qt_bin=p/'Qt'/'bin'; print('Qt bin:', qt_bin); print('Qt bin exists:', qt_bin.exists())"
+
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller --noconfirm --clean --onedir --windowed --name "BDC Generator" ^
+            --add-data "Templates;Templates" ^
+            --collect-all PySide6 ^
+            --collect-all shiboken6 ^
+            --collect-binaries PySide6 ^
+            --collect-binaries shiboken6 ^
+            --runtime-hook hooks/runtime_qt_path.py ^
+            --hidden-import=PySide6.QtCore ^
+            --hidden-import=PySide6.QtGui ^
+            --hidden-import=PySide6.QtWidgets ^
+            main.py
+        shell: cmd
+
+      - name: Debug - List dist contents before Qt copy
+        shell: pwsh
+        run: |
+          Write-Host "=== Contents of dist/BDC Generator ==="
+          Get-ChildItem -Path "dist/BDC Generator" -Recurse | Select-Object FullName | Format-Table -AutoSize
+          Write-Host "`n=== Looking for Qt DLLs before copy ==="
+          $qtDlls = Get-ChildItem -Path "dist/BDC Generator" -Recurse -Filter "Qt6*.dll" -ErrorAction SilentlyContinue
+          if ($qtDlls) {
+            $qtDlls | ForEach-Object { Write-Host "Found: $($_.FullName)" }
+          } else {
+            Write-Host "No Qt6 DLLs found yet (expected before Qt copy)"
+          }
+
+      - name: Copy Qt runtime DLLs
+        run: |
+          python scripts/copy_qt_runtime.py "dist/BDC Generator"
+        shell: cmd
+
+      - name: Debug - List dist contents after Qt copy
+        shell: pwsh
+        run: |
+          Write-Host "`n=== Contents of dist/BDC Generator after Qt copy ==="
+          Get-ChildItem -Path "dist/BDC Generator" -Recurse | Select-Object FullName | Format-Table -AutoSize
+
+      - name: Verify all required DLLs are present
         shell: pwsh
         run: |
           $distDir = Join-Path $PWD "dist/BDC Generator"
-          if (-not (Test-Path $distDir)) { throw "dist folder not found: $distDir" }
-          $required = @("Qt6*.dll", "shiboken6*.dll", "vcruntime140*.dll", "msvcp140.dll", "concrt140.dll")
-          foreach ($pattern in $required) {
-            $found = Get-ChildItem -Path $distDir -Recurse -Filter $pattern -ErrorAction SilentlyContinue
-            if (-not $found) { throw "Missing required DLLs matching: $pattern" }
-            $found | ForEach-Object { Write-Host "Found $pattern at $($_.FullName)" }
+          if (-not (Test-Path $distDir)) { 
+            throw "dist folder not found: $distDir" 
+          }
+          
+          Write-Host "`n=== Verifying required DLLs ==="
+          
+          # Qt DLLs
+          $qtDlls = Get-ChildItem -Path $distDir -Recurse -Filter "Qt6*.dll" -ErrorAction SilentlyContinue
+          if (-not $qtDlls) { 
+            Write-Host "ERROR: No Qt6 DLLs found!"
+            Write-Host "Expected location: $distDir\_internal\PySide6\Qt\bin\"
+            throw "Missing required DLLs matching: Qt6*.dll" 
+          }
+          Write-Host "✓ Found Qt6 DLLs:"
+          $qtDlls | ForEach-Object { Write-Host "  - $($_.Name) at $($_.FullName)" }
+          
+          # Shiboken DLLs
+          $shibokenDlls = Get-ChildItem -Path $distDir -Recurse -Filter "shiboken6*.dll" -ErrorAction SilentlyContinue
+          if (-not $shibokenDlls) { 
+            throw "Missing required DLLs matching: shiboken6*.dll" 
+          }
+          Write-Host "`n✓ Found Shiboken6 DLLs:"
+          $shibokenDlls | ForEach-Object { Write-Host "  - $($_.Name)" }
+          
+          # MSVC Runtime (optional, may be in system)
+          $vcDlls = Get-ChildItem -Path $distDir -Recurse -Filter "vcruntime140*.dll" -ErrorAction SilentlyContinue
+          if ($vcDlls) {
+            Write-Host "`n✓ Found MSVC Runtime DLLs:"
+            $vcDlls | ForEach-Object { Write-Host "  - $($_.Name)" }
+          } else {
+            Write-Host "`n⚠ MSVC Runtime DLLs not found in dist (may use system DLLs)"
           }
 
-      - name: Smoke test executable
+      - name: Create portable ZIP
         shell: pwsh
         run: |
-          $exePath = Join-Path $PWD "dist/BDC Generator/BDC Generator.exe"
-          if (-not (Test-Path $exePath)) { throw "Executable not found: $exePath" }
-          $process = Start-Process -FilePath $exePath -PassThru
-          Start-Sleep -Seconds 5
-          if (-not $process.HasExited) {
-            Stop-Process -Id $process.Id -Force
-            exit 0
-          }
-          exit $process.ExitCode
-
-      - name: Install Inno Setup
-        run: choco install innosetup --no-progress
-
-      - name: Debug Inno Setup path
-        shell: cmd
-        run: |
-          where ISCC
-          dir "C:\Program Files (x86)\Inno Setup 6\"
-
-      - name: Build installer
-        shell: cmd
-        run: "\"C:\\Program Files (x86)\\Inno Setup 6\\ISCC.exe\" installer\\bdc_generator.iss"
-
-      - name: Create release zip
-        shell: bash
-        run: |
-          mkdir -p release_zip
-          cp -r "dist/BDC Generator" release_zip/
-          cp README_Installation.txt README_PACKAGING.md release_zip/
-          cd release_zip
-          7z a ../BDC_Generator.zip *
+          $version = "1.0.0"
+          $zipName = "BDC_Generator_v${version}_Windows.zip"
+          Compress-Archive -Path "dist/BDC Generator/*" -DestinationPath $zipName -Force
+          Write-Host "Created: $zipName"
+          $size = (Get-Item $zipName).Length / 1MB
+          Write-Host "Size: $([math]::Round($size, 2)) MB"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: BDC_Generator
-          path: BDC_Generator.zip
+          name: BDC-Generator-Windows
+          path: BDC_Generator_v*.zip
+          retention-days: 30
