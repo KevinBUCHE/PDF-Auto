@@ -124,10 +124,13 @@ class MainWindow(QtWidgets.QMainWindow):
         buttons_layout = QtWidgets.QHBoxLayout()
         self.generate_button = QtWidgets.QPushButton("Générer les BDC")
         self.clear_button = QtWidgets.QPushButton("Vider la liste")
+        self.export_debug_button = QtWidgets.QPushButton("Exporter debug")
         self.generate_button.clicked.connect(self.generate_bdcs)
         self.clear_button.clicked.connect(self.clear_list)
+        self.export_debug_button.clicked.connect(self.export_debug)
         buttons_layout.addWidget(self.generate_button)
         buttons_layout.addWidget(self.clear_button)
+        buttons_layout.addWidget(self.export_debug_button)
         layout.addLayout(buttons_layout)
 
         self.logs = QtWidgets.QTextEdit()
@@ -190,6 +193,22 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if not opened:
             self.log("Impossible d'ouvrir le fichier log.")
+
+    def export_debug(self):
+        row = self.table.currentRow()
+        if row < 0:
+            self.log("Sélectionnez un devis pour exporter le debug.")
+            return
+        file_item = self.table.item(row, 0)
+        if not file_item:
+            self.log("Impossible de trouver le devis sélectionné.")
+            return
+        path = Path(file_item.text())
+        exported_path = self.parser.export_debug(path)
+        if not exported_path:
+            self.log(f"Aucune donnée debug disponible pour {path.name}.")
+            return
+        self.log(f"Debug exporté: {exported_path}")
 
     def choose_template_file(self):
         file_path, _ = QtWidgets.QFileDialog.getOpenFileName(

@@ -3,5 +3,5 @@ setlocal
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 pip install pyinstaller
-pyinstaller --onedir --windowed --name "BDC Generator" --add-data "Templates;Templates" main.py
+pyinstaller --onedir --windowed --name "BDC Generator" --add-data "Templates;Templates" --collect-all PySide6 --collect-all shiboken6 --runtime-hook hooks/runtime_qt_path.py --hidden-import=winrt --hidden-import=winrt.windows.media.ocr --hidden-import=winrt.windows.graphics.imaging --hidden-import=winrt.windows.storage.streams main.py
 endlocal
