@@ -47,11 +47,22 @@ jobs:
             --hidden-import=winrt.windows.storage.streams ^
             main.py
 
+      - name: Debug PySide6 Qt paths
+        run: |
+          python -c "import PySide6, pathlib; p=pathlib.Path(PySide6.__file__).resolve().parent; print('PySide6 at', p); print('Qt bin', p/'Qt'/'bin');"
+
+      - name: Copy Qt runtime
+        run: |
+          python scripts/copy_qt_runtime.py
+
       - name: Verify Qt and Shiboken DLLs are packaged
         shell: pwsh
         run: |
           $distDir = Join-Path $PWD "dist/BDC Generator"
           if (-not (Test-Path $distDir)) { throw "dist folder not found: $distDir" }
+          $qtCore = Get-ChildItem -Path $distDir -Recurse -Filter "Qt6Core.dll" -ErrorAction SilentlyContinue
+          if (-not $qtCore) { throw "Missing required DLL: Qt6Core.dll" }
+          $qtCore | ForEach-Object { Write-Host "Found Qt6Core DLL at $($_.FullName)" }
           $qt = Get-ChildItem -Path $distDir -Recurse -Filter "Qt6*.dll" -ErrorAction SilentlyContinue
           if (-not $qt) { throw "Missing required DLLs matching: Qt6*.dll" }
           $qt | ForEach-Object { Write-Host "Found Qt6 DLL at $($_.FullName)" }
