@@ -18,6 +18,6 @@ pyinstaller --noconfirm --clean --onedir --windowed --name "BDC Generator" ^
   --hidden-import=winrt.windows.storage.streams ^
   main.py
 
-python scripts\\copy_qt_runtime.py
+python scripts\\copy_qt_runtime.py "dist\\BDC Generator"
 
 endlocal

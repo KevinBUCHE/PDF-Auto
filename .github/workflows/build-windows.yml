@@ -49,11 +49,11 @@ jobs:
 
       - name: Debug PySide6 Qt paths
         run: |
-          python -c "import PySide6, pathlib; p=pathlib.Path(PySide6.__file__).resolve().parent; print('PySide6 at', p); print('Qt bin', p/'Qt'/'bin');"
+          python -c "import PySide6, pathlib; p=pathlib.Path(PySide6.__file__).resolve().parent; qt_bin=p/'Qt'/'bin'; print('PySide6 at', p); print('Qt bin', qt_bin); print('Qt6Core DLLs', [str(x) for x in qt_bin.glob('Qt6Core*.dll')]);"
 
       - name: Copy Qt runtime
         run: |
-          python scripts/copy_qt_runtime.py
+          python scripts/copy_qt_runtime.py "dist/BDC Generator"
 
       - name: Verify Qt and Shiboken DLLs are packaged
         shell: pwsh

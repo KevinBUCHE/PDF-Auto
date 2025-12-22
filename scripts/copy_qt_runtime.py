@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import shutil
 from pathlib import Path
 
@@ -21,7 +22,21 @@ def _copy_tree(src: Path, dest: Path) -> int:
     return count
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Copy PySide6 Qt runtime files into a PyInstaller dist."
+    )
+    parser.add_argument(
+        "dist_root",
+        nargs="?",
+        default=None,
+        help='Path to the PyInstaller dist root (e.g. "dist/BDC Generator").',
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = _parse_args()
     pyside_root = Path(PySide6.__file__).resolve().parent
     qt_bin = pyside_root / "Qt" / "bin"
     qt_plugins = pyside_root / "Qt" / "plugins"
@@ -30,15 +45,11 @@ def main() -> None:
     if not qt_core.exists():
         raise FileNotFoundError(f"Qt6Core.dll not found in {qt_bin}")
 
-    repo_root = Path(__file__).resolve().parents[1]
-    dest_base = (
-        repo_root
-        / "dist"
-        / "BDC Generator"
-        / "_internal"
-        / "PySide6"
-        / "Qt"
-    )
+    if args.dist_root:
+        dist_root = Path(args.dist_root)
+    else:
+        dist_root = Path(__file__).resolve().parents[1] / "dist" / "BDC Generator"
+    dest_base = dist_root / "_internal" / "PySide6" / "Qt"
     dest_bin = dest_base / "bin"
     dest_plugins = dest_base / "plugins"
 
