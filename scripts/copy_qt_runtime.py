@@ -1,175 +1,177 @@
 """
-Script de test pour vérifier l'installation de PySide6 et Qt
-À lancer AVANT le build pour diagnostiquer les problèmes
+Diagnostic PySide6 / Qt (CI-safe, ASCII only)
+
+But:
+- Verifier que PySide6 est installable/importable
+- Verifier que les DLL Qt6 existent dans PySide6/Qt/bin
+- Verifier Shiboken6
+- Verifier imports PySide6.QtCore/QtGui/QtWidgets
+
+IMPORTANT:
+- Sortie ASCII uniquement (pas de ✓ / emojis) pour eviter UnicodeEncodeError sur Windows CP1252.
 """
+
+from __future__ import annotations
+
 import sys
 from pathlib import Path
 
 
-def test_pyside6_import():
-    """Test 1: Import de PySide6"""
-    print("\n" + "=" * 60)
-    print("TEST 1: Import PySide6")
-    print("=" * 60)
-    
+def _safe_io_utf8() -> None:
+    """Force UTF-8 if supported (does not fail if not supported)."""
     try:
-        import PySide6
-        print(f"✓ PySide6 version: {PySide6.__version__}")
-        print(f"✓ PySide6 location: {PySide6.__file__}")
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        # Never fail the diagnostic because of encoding.
+        pass
+
+
+def _section(title: str) -> None:
+    print("\n" + "=" * 70)
+    print(title)
+    print("=" * 70)
+
+
+def test_pyside6_import() -> bool:
+    _section("TEST 1: Import PySide6")
+    try:
+        import PySide6  # type: ignore
+
+        print(f"OK: PySide6 version   : {getattr(PySide6, '__version__', 'unknown')}")
+        print(f"OK: PySide6 location  : {getattr(PySide6, '__file__', 'unknown')}")
         return True
-    except ImportError as e:
-        print(f"✗ Erreur import PySide6: {e}")
-        return False
-
-
-def test_qt_dlls():
-    """Test 2: Vérification des DLLs Qt"""
-    print("\n" + "=" * 60)
-    print("TEST 2: Vérification DLLs Qt")
-    print("=" * 60)
-    
-    try:
-        import PySide6
-        pyside_root = Path(PySide6.__file__).parent
-        qt_bin = pyside_root / "Qt" / "bin"
-        
-        print(f"\n📍 PySide6 root: {pyside_root}")
-        print(f"📍 Qt bin: {qt_bin}")
-        
-        if not qt_bin.exists():
-            print(f"✗ Dossier Qt bin inexistant: {qt_bin}")
-            return False
-        
-        print(f"✓ Dossier Qt bin existe")
-        
-        # Lister les DLLs Qt
-        qt_dlls = list(qt_bin.glob("Qt6*.dll"))
-        if not qt_dlls:
-            print(f"✗ Aucune DLL Qt6 trouvée dans {qt_bin}")
-            return False
-        
-        print(f"\n✓ {len(qt_dlls)} DLLs Qt6 trouvées:")
-        for dll in sorted(qt_dlls)[:10]:  # Afficher les 10 premières
-            size_mb = dll.stat().st_size / (1024 * 1024)
-            print(f"  - {dll.name} ({size_mb:.2f} MB)")
-        
-        if len(qt_dlls) > 10:
-            print(f"  ... et {len(qt_dlls) - 10} autres")
-        
-        # Vérifier les DLLs critiques
-        critical_dlls = [
-            "Qt6Core.dll",
-            "Qt6Gui.dll",
-            "Qt6Widgets.dll"
-        ]
-        
-        print("\n🔍 DLLs critiques:")
-        all_ok = True
-        for dll_name in critical_dlls:
-            dll_path = qt_bin / dll_name
-            if dll_path.exists():
-                size_mb = dll_path.stat().st_size / (1024 * 1024)
-                print(f"  ✓ {dll_name} ({size_mb:.2f} MB)")
-            else:
-                print(f"  ✗ {dll_name} MANQUANT")
-                all_ok = False
-        
-        return all_ok
-        
     except Exception as e:
-        print(f"✗ Erreur: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"FAIL: Import PySide6  : {type(e).__name__}: {e}")
         return False
 
 
-def test_shiboken6():
-    """Test 3: Vérification Shiboken6"""
-    print("\n" + "=" * 60)
-    print("TEST 3: Vérification Shiboken6")
-    print("=" * 60)
-    
+def test_qt_dlls() -> bool:
+    _section("TEST 2: Verification DLLs Qt (Qt6*.dll)")
+
     try:
-        import shiboken6
-        print(f"✓ Shiboken6 version: {shiboken6.__version__}")
-        
-        shiboken_root = Path(shiboken6.__file__).parent
-        print(f"✓ Shiboken6 location: {shiboken_root}")
-        
-        # Chercher les DLLs shiboken
-        shiboken_dlls = list(shiboken_root.glob("shiboken6*.dll"))
-        if shiboken_dlls:
-            print(f"✓ {len(shiboken_dlls)} DLL(s) Shiboken trouvée(s):")
-            for dll in shiboken_dlls:
+        import PySide6  # type: ignore
+
+        pyside_root = Path(PySide6.__file__).resolve().parent  # type: ignore
+        qt_bin = pyside_root / "Qt" / "bin"
+
+        print(f"INFO: PySide6 root    : {pyside_root}")
+        print(f"INFO: Qt bin          : {qt_bin}")
+
+        if not qt_bin.exists():
+            print(f"FAIL: Qt bin missing  : {qt_bin}")
+            return False
+
+        print("OK: Qt bin exists")
+
+        qt_dlls = sorted(qt_bin.glob("Qt6*.dll"))
+        if not qt_dlls:
+            print("FAIL: No Qt6*.dll found in Qt/bin")
+            return False
+
+        print(f"OK: Found {len(qt_dlls)} Qt6 DLL(s) (showing up to 15):")
+        for dll in qt_dlls[:15]:
+            try:
+                size_mb = dll.stat().st_size / (1024 * 1024)
+                print(f"  - {dll.name} ({size_mb:.2f} MB)")
+            except Exception:
                 print(f"  - {dll.name}")
-        else:
-            print("⚠ Aucune DLL Shiboken trouvée (peut être dans PySide6)")
-        
-        return True
-        
-    except ImportError as e:
-        print(f"✗ Erreur import Shiboken6: {e}")
+
+        if len(qt_dlls) > 15:
+            print(f"  ... plus {len(qt_dlls) - 15} other(s)")
+
+        # Critical DLLs
+        critical = ["Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll"]
+        print("\nINFO: Critical DLLs:")
+        all_ok = True
+        for name in critical:
+            p = qt_bin / name
+            if p.exists():
+                size_mb = p.stat().st_size / (1024 * 1024)
+                print(f"  OK  : {name} ({size_mb:.2f} MB)")
+            else:
+                print(f"  FAIL: {name} missing")
+                all_ok = False
+
+        return all_ok
+
+    except Exception as e:
+        print(f"FAIL: Qt DLL check    : {type(e).__name__}: {e}")
         return False
 
 
-def test_qt_modules():
-    """Test 4: Import des modules Qt"""
-    print("\n" + "=" * 60)
-    print("TEST 4: Import modules Qt")
-    print("=" * 60)
-    
-    modules = [
-        "PySide6.QtCore",
-        "PySide6.QtGui",
-        "PySide6.QtWidgets"
-    ]
-    
+def test_shiboken6() -> bool:
+    _section("TEST 3: Verification Shiboken6")
+    try:
+        import shiboken6  # type: ignore
+
+        print(f"OK: Shiboken6 version : {getattr(shiboken6, '__version__', 'unknown')}")
+        root = Path(shiboken6.__file__).resolve().parent  # type: ignore
+        print(f"OK: Shiboken6 path    : {root}")
+
+        dlls = sorted(root.glob("shiboken6*.dll"))
+        if dlls:
+            print(f"OK: Found {len(dlls)} shiboken DLL(s):")
+            for d in dlls:
+                print(f"  - {d.name}")
+        else:
+            print("WARN: No shiboken6*.dll in shiboken6 folder (may be bundled under PySide6)")
+        return True
+
+    except Exception as e:
+        print(f"FAIL: Import shiboken6: {type(e).__name__}: {e}")
+        return False
+
+
+def test_qt_modules() -> bool:
+    _section("TEST 4: Import Qt modules")
+    modules = ["PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets"]
     all_ok = True
-    for module in modules:
+
+    for mod in modules:
         try:
-            __import__(module)
-            print(f"✓ {module}")
-        except ImportError as e:
-            print(f"✗ {module}: {e}")
+            __import__(mod)
+            print(f"OK: {mod}")
+        except Exception as e:
+            print(f"FAIL: {mod} : {type(e).__name__}: {e}")
             all_ok = False
-    
+
     return all_ok
 
 
-def main():
-    """Exécute tous les tests"""
+def main() -> None:
+    _safe_io_utf8()
+
     print("\n" + "=" * 70)
-    print(" DIAGNOSTIC INSTALLATION PySide6 / Qt ".center(70, "="))
+    print("DIAGNOSTIC INSTALLATION PySide6 / Qt".center(70))
     print("=" * 70)
-    
+
     results = {
         "Import PySide6": test_pyside6_import(),
-        "DLLs Qt": test_qt_dlls(),
+        "Qt DLLs": test_qt_dlls(),
         "Shiboken6": test_shiboken6(),
-        "Modules Qt": test_qt_modules()
+        "Qt modules": test_qt_modules(),
     }
-    
-    # Résumé
-    print("\n" + "=" * 70)
-    print(" RÉSUMÉ ".center(70, "="))
-    print("=" * 70)
-    
-    for test_name, result in results.items():
-        status = "✅ OK" if result else "❌ ÉCHEC"
-        print(f"{test_name:30} {status}")
-    
+
+    _section("SUMMARY")
+    for name, ok in results.items():
+        status = "OK" if ok else "FAIL"
+        print(f"{name:20} : {status}")
+
     all_ok = all(results.values())
-    
     print("\n" + "=" * 70)
     if all_ok:
-        print("✅ TOUS LES TESTS RÉUSSIS".center(70))
-        print("Vous pouvez lancer le build PyInstaller".center(70))
+        print("ALL TESTS PASSED - You can run PyInstaller.".center(70))
+        exit_code = 0
     else:
-        print("❌ CERTAINS TESTS ONT ÉCHOUÉ".center(70))
-        print("Réinstallez PySide6: pip install --force-reinstall PySide6".center(70))
+        print("SOME TESTS FAILED - Fix dependencies before building.".center(70))
+        print("Hint: python -m pip install --force-reinstall PySide6 shiboken6".center(70))
+        exit_code = 1
     print("=" * 70 + "\n")
-    
-    sys.exit(0 if all_ok else 1)
+
+    raise SystemExit(exit_code)
 
 
 if __name__ == "__main__":
