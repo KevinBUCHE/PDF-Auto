@@ -38,18 +38,25 @@ jobs:
             --add-data "Templates;Templates" ^
             --collect-all PySide6 ^
             --collect-all shiboken6 ^
+            --collect-all PyMuPDF ^
             --collect-binaries PySide6 ^
             --collect-binaries shiboken6 ^
+            --collect-binaries PyMuPDF ^
             --runtime-hook hooks\runtime_qt_path.py ^
             --hidden-import=winrt ^
             --hidden-import=winrt.windows.media.ocr ^
             --hidden-import=winrt.windows.graphics.imaging ^
             --hidden-import=winrt.windows.storage.streams ^
+            --hidden-import=fitz ^
             main.py
 
       - name: Debug PySide6 Qt paths
         run: |
           python -c "import pathlib; from PySide6.QtCore import QLibraryInfo; import PySide6; p=pathlib.Path(PySide6.__file__).resolve().parent; print('PySide6 at', p); print('Qt bin candidate', p/'Qt'/'bin'); print('Qt bin QLibraryInfo', QLibraryInfo.path(QLibraryInfo.LibraryPath.BinariesPath) if hasattr(QLibraryInfo, 'path') else QLibraryInfo.location(QLibraryInfo.LibraryPath.BinariesPath)); print('Qt plugins QLibraryInfo', QLibraryInfo.path(QLibraryInfo.LibraryPath.PluginsPath) if hasattr(QLibraryInfo, 'path') else QLibraryInfo.location(QLibraryInfo.LibraryPath.PluginsPath));"
+
+      - name: Diagnose Qt runtime (ASCII)
+        run: |
+          python scripts/diagnose_qt.py
 
       - name: Copy Qt runtime
         run: |

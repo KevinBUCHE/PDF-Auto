@@ -83,12 +83,15 @@ jobs:
             --add-data "Templates;Templates" `
             --collect-all PySide6 `
             --collect-all shiboken6 `
+            --collect-all PyMuPDF `
             --collect-binaries PySide6 `
             --collect-binaries shiboken6 `
+            --collect-binaries PyMuPDF `
             --runtime-hook "hooks/runtime_qt_path.py" `
             --hidden-import "PySide6.QtCore" `
             --hidden-import "PySide6.QtGui" `
             --hidden-import "PySide6.QtWidgets" `
+            --hidden-import "fitz" `
             main.py
 
       - name: Debug - List dist contents before Qt copy
@@ -133,11 +136,11 @@ jobs:
             Get-ChildItem -Path $distDir -Recurse | Select-Object -First 200 FullName
             throw "Missing Qt6Core*.dll in $distDir"
           }
-          Write-Host "✓ Found Qt6Core: $($qtCore[0].FullName)"
+          Write-Host "Found Qt6Core: $($qtCore[0].FullName)"
 
           $shiboken = Get-ChildItem -Path $distDir -Recurse -Filter "shiboken6*.dll" -ErrorAction SilentlyContinue
           if (-not $shiboken) { throw "Missing shiboken6*.dll in $distDir" }
-          Write-Host "✓ Found shiboken6 DLLs: $($shiboken.Count)"
+          Write-Host "Found shiboken6 DLLs: $($shiboken.Count)"
 
       - name: Create portable ZIP
         shell: pwsh

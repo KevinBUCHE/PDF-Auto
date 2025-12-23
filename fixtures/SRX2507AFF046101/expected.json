@@ -1,0 +1,45 @@
+{
+  "source_pdf": "Sample/SRX2507AFF046101_20250731_153004.pdf",
+  "devis_annee_mois": "2507",
+  "devis_type": "AFF",
+  "devis_num": "046101",
+  "ref_affaire": "LECLERC",
+
+  "client_nom": "MAISONS CLAUDE RIZZON",
+  "client_contact": "",
+  "client_adresse1": "",
+  "client_adresse2": "1 ROUTE DE BRIEY",
+  "client_cp": "57160",
+  "client_ville": "CHATEL ST GERMAIN",
+  "client_tel": "",
+  "client_email": "Franck.REMIATTE@rizzon.com",
+
+  "commercial_nom": "BUCHE Kevin",
+  "commercial_tel": "06 07 39 37 25",
+  "commercial_tel2": "03 87 60 46 44",
+  "commercial_email": "kevin.buche@groupe-riaux.fr",
+
+  "fourniture_ht": "1 100,43",
+  "prestations_ht": "954,50",
+  "total_ht": "2 054,93",
+
+  "esc_gamme": "BOIS (Personnalisé)",
+  "esc_essence": "Hêtre",
+  "esc_main_courante": "Rectangulaire",
+  "esc_main_courante_scellement": "",
+  "esc_nez_de_marches": "",
+
+  "esc_finition_marches": "",
+  "esc_finition_structure": "",
+  "esc_finition_mains_courante": "Brut de ponçage",
+  "esc_finition_contremarche": "",
+  "esc_finition_rampe": "Remplissage Inox",
+
+  "esc_tete_de_poteau": "Droit Tête Double Piton",
+  "esc_poteaux_depart": "",
+
+  "pose_sold": true,
+  "pose_amount": "",
+
+  "parse_warning": ""
+}
