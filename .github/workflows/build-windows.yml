@@ -32,6 +32,10 @@ jobs:
           python -m pip install -r requirements.txt
           python -m pip install PySide6==6.6.3 PySide6_Essentials==6.6.3 PySide6_Addons==6.6.3 shiboken6==6.6.3 pyinstaller
 
+      - name: Verify PyMuPDF import
+        run: |
+          python -c "import fitz; print('PyMuPDF OK')"
+
       - name: Build portable app
         run: |
           python -m PyInstaller --noconfirm --clean --onedir --windowed --name "BDC Generator" ^
