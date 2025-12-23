@@ -79,8 +79,13 @@ CRITICAL_FIELDS = {
 
 
 class BdcFiller:
-    def __init__(self, logger: Optional[Callable[[str], None]] = None):
+    def __init__(
+        self,
+        logger: Optional[Callable[[str], None]] = None,
+        debug: bool = False,
+    ):
         self._logger = logger
+        self.debug = debug
 
     def fill(self, template_path: Path, data: dict, output_path: Path):
         try:
@@ -121,7 +126,8 @@ class BdcFiller:
             values_to_set = self._build_values_to_set(
                 fields, checkbox_states, bdc_fields
             )
-            self._log(f"values_to_set={values_to_set}")
+            if self.debug:
+                self._log(f"values_to_set={values_to_set}")
 
             text_values = {
                 key: value
