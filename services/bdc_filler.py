@@ -105,13 +105,9 @@ class BdcFiller:
             fields = self._build_fields(data)
             checkbox_states = self._build_checkbox_states(data)
 
-            expected_fields = TEXT_FIELDS | CHECKBOX_FIELDS
             missing_critical = [
                 name for name in CRITICAL_FIELDS if name not in bdc_fields
             ]
-            for name in sorted(expected_fields):
-                if name not in bdc_fields:
-                    self._log(f"Champ bdc_* introuvable: {name}")
             if missing_critical:
                 raise ValueError(
                     "Champs critiques manquants dans le template: "
@@ -159,14 +155,18 @@ class BdcFiller:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             with open(output_path, "wb") as output_file:
                 writer.write(output_file)
-            self._validate_output_fields(
-                output_path,
-                [
+            critical_to_check = [
+                name
+                for name in (
                     "bdc_client_nom",
-                    "bdc_date_commande",
+                    "bdc_ref_affaire",
+                    "bdc_devis_annee_mois",
                     "bdc_devis_num",
-                ],
-            )
+                    "bdc_montant_fourniture_ht",
+                )
+                if name in bdc_fields
+            ]
+            self._validate_output_fields(output_path, critical_to_check)
         except Exception as exc:
             self._log(f"Erreur: {type(exc).__name__}: {exc}")
             self._log(traceback.format_exc())
@@ -304,6 +304,8 @@ class BdcFiller:
             kid_obj.update({NameObject("/AS"): value})
 
     def _validate_output_fields(self, output_path: Path, field_names: list[str]):
+        if not field_names:
+            return
         reader = PdfReader(str(output_path))
         values = self._extract_field_values(reader, set(field_names))
         for name in field_names:

@@ -27,6 +27,10 @@ LEGAL_NOISE_RE = re.compile(
     re.IGNORECASE,
 )
 TEL_MARKER_RE = re.compile(r"\b(t[eé]l|tel|fax)\b", re.IGNORECASE)
+CLIENT_STOP_RE = re.compile(
+    r"\b(contact commercial|t[eé]l|tel|fax|validit[eé]|d[eé]signation|désignation|conditions)\b",
+    re.IGNORECASE,
+)
 ESSENCE_RE = re.compile(
     r"\b(ch[eê]ne|h[eê]tre|fr[eê]ne|sapin|pin|hêtre|chêne)\b", re.IGNORECASE
 )
@@ -137,10 +141,22 @@ class DevisParser:
                 "Client: nom contient 'Réalisé par'.\n"
                 f"[PARSE] context around Code client:\n{dump}"
             )
+        if self.debug and self._is_invalid_client_name(client_details["nom"]):
+            dump = self._dump_lines_around(lines, client_details.get("code_index"))
+            warnings.append(
+                "[DEBUG] Détection client incohérente.\n"
+                f"[PARSE] context around Code client:\n{dump}"
+            )
         if CP_VILLE_RE.search(commercial_details["nom"]):
             dump = self._dump_lines_around(lines, commercial_details.get("contact_index"))
             warnings.append(
                 "Commercial: nom ressemble à un CP/Ville.\n"
+                f"[PARSE] context around contact commercial:\n{dump}"
+            )
+        if self.debug and self._is_invalid_commercial_name(commercial_details["nom"]):
+            dump = self._dump_lines_around(lines, commercial_details.get("contact_index"))
+            warnings.append(
+                "[DEBUG] Détection commercial incohérente.\n"
                 f"[PARSE] context around contact commercial:\n{dump}"
             )
         if srx_debug:
@@ -368,16 +384,10 @@ class DevisParser:
         return ""
 
     def _find_client_details(self, lines, blocks=None):
-        if blocks:
-            return self._find_client_details_from_blocks(lines, blocks)
         return self._find_client_details_from_lines(lines)
 
     def _find_client_details_from_lines(self, lines):
-        code_index = None
-        for idx, line in enumerate(lines):
-            if "code client" in line.lower():
-                code_index = idx
-                break
+        code_index = self._find_line_index(lines, "code client")
         if code_index is None:
             return {
                 "nom": "",
@@ -390,54 +400,8 @@ class DevisParser:
                 "contact": "",
                 "code_index": None,
             }
-        client_block_lines = []
-        for idx in range(code_index + 1, len(lines)):
-            line = self._clean_line(lines[idx])
-            if not line:
-                continue
-            lowered = line.lower()
-            if "contact commercial" in lowered:
-                stop_at = lowered.find("contact commercial")
-                snippet = line[:stop_at].strip()
-                if snippet and not self._is_legal_noise(snippet) and "vaugarny" not in snippet.lower():
-                    client_block_lines.append(snippet)
-                break
-            tel_match = TEL_MARKER_RE.search(line)
-            if tel_match:
-                snippet = line[: tel_match.start()].strip()
-                if snippet and not self._is_legal_noise(snippet) and "vaugarny" not in snippet.lower():
-                    client_block_lines.append(snippet)
-                break
-            if self._is_legal_noise(line):
-                continue
-            if "vaugarny" in lowered:
-                continue
-            client_block_lines.append(line)
-        client_nom = ""
-        address_lines = []
-        if client_block_lines:
-            first_line = self._clean_line(client_block_lines[0])
-            if self._is_probable_company_name(first_line):
-                client_nom = first_line
-                address_lines = client_block_lines[1:]
-            else:
-                address_lines = client_block_lines
-        if not client_nom:
-            scan_start = max(code_index - 12, 0)
-            for prev in range(code_index - 1, scan_start - 1, -1):
-                candidate = self._clean_line(lines[prev])
-                if not candidate:
-                    continue
-                lowered = candidate.lower()
-                if "vaugarny" in lowered:
-                    continue
-                if CP_VILLE_RE.search(candidate):
-                    continue
-                if NOISE_HEADER_RE.search(lowered):
-                    continue
-                if self._is_probable_company_name(candidate):
-                    client_nom = candidate
-                    break
+        client_nom = self._find_client_name_above(lines, code_index)
+        address_lines = self._collect_client_address_lines(lines, code_index)
         contact, address_lines = self._extract_contact(address_lines)
         adresse1, adresse2, cp, ville = self._split_address_lines(address_lines)
         tel = self._find_phone(lines[code_index : code_index + 6])
@@ -454,69 +418,57 @@ class DevisParser:
             "code_index": code_index,
         }
 
-    def _find_client_details_from_blocks(self, lines, blocks):
-        code_block = self._find_block_containing(blocks, "code client")
-        code_index = self._find_line_index(lines, "code client")
-        if not code_block:
-            return {
-                "nom": "",
-                "adresse1": "",
-                "adresse2": "",
-                "cp": "",
-                "ville": "",
-                "tel": "",
-                "email": "",
-                "contact": "",
-                "code_index": code_index,
-            }
-        client_nom = ""
-        address_lines = []
-        candidate_block = self._find_nearest_block_above(blocks, code_block)
-        if candidate_block:
-            for line in self._block_lines(candidate_block["text"]):
-                if self._is_probable_company_name(line):
-                    client_nom = line
-                    break
-        for block in self._blocks_below_anchor(blocks, code_block):
-            if not self._is_same_column(block, code_block):
-                continue
-            text_lower = block["text"].lower()
-            if "contact commercial" in text_lower or TEL_MARKER_RE.search(block["text"]):
-                break
-            for line in self._block_lines(block["text"]):
-                if not line:
-                    continue
-                lowered = line.lower()
-                if "code client" in lowered:
-                    continue
-                if self._is_legal_noise(line):
-                    continue
-                if "vaugarny" in lowered:
-                    continue
-                address_lines.append(line)
-        if not client_nom and address_lines:
-            first_line = self._clean_line(address_lines[0])
-            if self._is_probable_company_name(first_line):
-                client_nom = first_line
-                address_lines = address_lines[1:]
-        contact, address_lines = self._extract_contact(address_lines)
-        adresse1, adresse2, cp, ville = self._split_address_lines(address_lines)
-        tel = self._find_phone(lines[code_index : code_index + 6]) if code_index is not None else ""
-        email = self._find_email(lines[code_index : code_index + 6]) if code_index is not None else ""
-        return {
-            "nom": client_nom,
-            "adresse1": adresse1,
-            "adresse2": adresse2,
-            "cp": cp,
-            "ville": ville,
-            "tel": tel,
-            "email": email,
-            "contact": contact,
-            "code_index": code_index,
-        }
-
     def _is_legal_noise(self, line: str) -> bool:
         return LEGAL_NOISE_RE.search(line) is not None
+
+    def _find_client_name_above(self, lines: list[str], code_index: int) -> str:
+        fallback = ""
+        scan_start = max(code_index - 15, 0)
+        for prev in range(code_index - 1, scan_start - 1, -1):
+            candidate = self._clean_line(lines[prev])
+            if not candidate:
+                continue
+            lowered = candidate.lower()
+            if candidate.upper().startswith("DEVIS"):
+                continue
+            if lowered.startswith("date du devis"):
+                continue
+            if lowered.startswith("réf affaire"):
+                continue
+            if NOISE_HEADER_RE.search(lowered):
+                continue
+            if CP_VILLE_RE.search(candidate):
+                continue
+            if self._is_legal_noise(candidate):
+                continue
+            if self._looks_like_address_line(candidate):
+                if not fallback and self._is_probable_company_name(candidate):
+                    fallback = candidate
+                continue
+            if self._is_probable_company_name(candidate):
+                return candidate
+        return fallback
+
+    def _collect_client_address_lines(self, lines: list[str], code_index: int) -> list[str]:
+        collected = []
+        for idx in range(code_index + 1, len(lines)):
+            line = self._clean_line(lines[idx])
+            if not line:
+                continue
+            lowered = line.lower()
+            if CLIENT_STOP_RE.search(lowered):
+                break
+            if self._is_legal_noise(line):
+                continue
+            if "code client" in lowered:
+                continue
+            collected.append(line)
+        return collected
+
+    def _looks_like_address_line(self, value: str) -> bool:
+        if STREET_HINT_RE.search(value):
+            return True
+        return bool(re.match(r"^\d+\s+\w+", value))
 
     def _find_line_index(self, lines: list[str], needle: str):
         needle_lower = needle.lower()
@@ -656,8 +608,6 @@ class DevisParser:
         return (upper_count / len(letters)) >= 0.6
 
     def _find_commercial_details(self, lines, blocks=None):
-        if blocks:
-            return self._find_commercial_details_from_blocks(lines, blocks)
         return self._find_commercial_details_from_lines(lines)
 
     def _find_commercial_details_from_lines(self, lines):
@@ -671,14 +621,12 @@ class DevisParser:
                     if self._is_valid_commercial_name_candidate(candidate):
                         name = candidate
                 if not name:
-                    for next_idx in range(idx + 1, min(idx + 9, len(lines))):
+                    for next_idx in range(idx + 1, len(lines)):
                         candidate = self._clean_line(lines[next_idx])
-                        if self._is_valid_commercial_name_candidate(candidate):
-                            name = candidate
-                            break
-                if not name:
-                    for prev in range(idx - 1, max(idx - 9, -1), -1):
-                        candidate = self._clean_line(lines[prev])
+                        if not candidate:
+                            continue
+                        if CP_VILLE_RE.search(candidate):
+                            continue
                         if self._is_valid_commercial_name_candidate(candidate):
                             name = candidate
                             break
@@ -693,42 +641,6 @@ class DevisParser:
                     "contact_index": idx,
                 }
         return {"nom": "", "tel": "", "email": "", "contact_index": None}
-
-    def _find_commercial_details_from_blocks(self, lines, blocks):
-        contact_block = self._find_block_containing(blocks, "contact commercial")
-        contact_index = self._find_line_index(lines, "contact commercial")
-        if not contact_block:
-            return {"nom": "", "tel": "", "email": "", "contact_index": contact_index}
-        name = ""
-        for line in self._block_lines(contact_block["text"]):
-            match = re.search(r"contact commercial\s*:\s*(.+)", line, re.IGNORECASE)
-            if match:
-                candidate = self._clean_line(match.group(1))
-                if self._is_valid_commercial_name_candidate(candidate):
-                    name = candidate
-                    break
-        if not name:
-            below = self._find_nearest_block_below(blocks, contact_block)
-            if below:
-                for line in self._block_lines(below["text"]):
-                    if self._is_valid_commercial_name_candidate(line):
-                        name = line
-                        break
-        if not name:
-            above = self._find_nearest_block_above(blocks, contact_block)
-            if above:
-                for line in self._block_lines(above["text"]):
-                    if self._is_valid_commercial_name_candidate(line):
-                        name = line
-                        break
-        search_start = max(contact_index - 3, 0) if contact_index is not None else 0
-        search_lines = lines[search_start : contact_index + 11] if contact_index is not None else lines
-        return {
-            "nom": name,
-            "tel": self._find_phone(search_lines),
-            "email": self._find_email(search_lines),
-            "contact_index": contact_index,
-        }
 
     def _is_valid_commercial_name_candidate(self, candidate: str) -> bool:
         if not candidate:
