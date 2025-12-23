@@ -1,12 +1,29 @@
 import re
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+import logging
 
-import fitz
+try:
+    import fitz
+
+    FITZ_AVAILABLE = True
+except Exception:  # pylint: disable=broad-except
+    fitz = None
+    FITZ_AVAILABLE = False
+
+try:
+    import pdfplumber
+
+    PDFPLUMBER_AVAILABLE = True
+except Exception:  # pylint: disable=broad-except
+    pdfplumber = None
+    PDFPLUMBER_AVAILABLE = False
 from PIL import Image
 
 from services.ocr_windows import OcrNotAvailableError, ocr_image
 
+
+logger = logging.getLogger(__name__)
 
 AMOUNT_RE = re.compile(r"([0-9][0-9\s\u202f]*[\.,][0-9]{2})")
 SRX_RE = re.compile(r"SRX(?P<yymm>\d{4})(?P<type>[A-Z]{3})(?P<num>\d{6})")
@@ -293,6 +310,9 @@ class DevisParser:
     def _extract_text(self, path: Path) -> tuple[str, list[str], list[dict]]:
         if not path.exists():
             raise FileNotFoundError(path)
+        if not FITZ_AVAILABLE:
+            logger.warning("PyMuPDF absent -> fallback pdfplumber")
+            return self._extract_text_pdfplumber(path)
         text_parts = []
         blocks = []
         with fitz.open(path) as doc:
@@ -308,6 +328,30 @@ class DevisParser:
                         {"text": text, "bbox": bbox, "page_index": page_index}
                     )
                     text_parts.append(text)
+        text = "\n".join(text_parts)
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        return text, lines, blocks
+
+    def _extract_text_pdfplumber(self, path: Path) -> tuple[str, list[str], list[dict]]:
+        if not PDFPLUMBER_AVAILABLE:
+            logger.warning("pdfplumber indisponible: extraction texte impossible sans PyMuPDF.")
+            return "", [], []
+        text_parts = []
+        blocks = []
+        with pdfplumber.open(str(path)) as doc:
+            for page_index, page in enumerate(doc.pages):
+                page_text = page.extract_text() or ""
+                if page_text:
+                    text_parts.append(page_text)
+                words = page.extract_words() or []
+                for word in words:
+                    text = (word.get("text") or "").strip()
+                    if not text:
+                        continue
+                    bbox = (word["x0"], word["top"], word["x1"], word["bottom"])
+                    blocks.append(
+                        {"text": text, "bbox": bbox, "page_index": page_index}
+                    )
         text = "\n".join(text_parts)
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         return text, lines, blocks
@@ -842,6 +886,8 @@ class DevisParser:
         return not self._is_valid_commercial_name_candidate(cleaned)
 
     def _build_ocr_zones(self, doc, blocks: list[dict]) -> list[dict]:
+        if not FITZ_AVAILABLE:
+            return []
         zones = []
         code_block = self._find_block_containing(blocks, "code client")
         contact_block = self._find_block_containing(blocks, "contact commercial")
@@ -892,13 +938,16 @@ class DevisParser:
                 zones.append({"page_index": 0, "rect": middle_rect, "label": "fallback_middle"})
         return zones[:3]
 
-    def _render_ocr_region(self, page, rect: fitz.Rect) -> Image.Image:
+    def _render_ocr_region(self, page, rect: "fitz.Rect") -> Image.Image:
         pix = page.get_pixmap(clip=rect, dpi=300)
         mode = "RGBA" if pix.alpha else "RGB"
         return Image.frombytes(mode, [pix.width, pix.height], pix.samples)
 
     def _run_ocr_fallback(self, path: Path, blocks: list[dict], warnings: list[str]) -> list[dict]:
         ocr_results = []
+        if not FITZ_AVAILABLE:
+            warnings.append("PyMuPDF absent -> OCR indisponible.")
+            return ocr_results
         try:
             with fitz.open(path) as doc:
                 zones = self._build_ocr_zones(doc, blocks)

@@ -18,15 +18,12 @@ python -m PyInstaller ^
     --add-data "Templates;Templates" ^
     --collect-all PySide6 ^
     --collect-all shiboken6 ^
-    --collect-all PyMuPDF ^
     --collect-binaries PySide6 ^
     --collect-binaries shiboken6 ^
-    --collect-binaries PyMuPDF ^
     --runtime-hook hooks\runtime_qt_path.py ^
     --hidden-import=PySide6.QtCore ^
     --hidden-import=PySide6.QtGui ^
     --hidden-import=PySide6.QtWidgets ^
-    --hidden-import=fitz ^
     main.py
 
 if errorlevel 1 (
