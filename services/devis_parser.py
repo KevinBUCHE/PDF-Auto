@@ -2,10 +2,7 @@ import re
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
-import fitz
-from PIL import Image
-
-from services.ocr_windows import OcrNotAvailableError, ocr_image
+import pdfplumber
 
 
 AMOUNT_RE = re.compile(r"([0-9][0-9\s\u202f]*[\.,][0-9]{2})")
@@ -29,6 +26,10 @@ LEGAL_NOISE_RE = re.compile(
 TEL_MARKER_RE = re.compile(r"\b(t[eé]l|tel|fax)\b", re.IGNORECASE)
 ESSENCE_RE = re.compile(
     r"\b(ch[eê]ne|h[eê]tre|fr[eê]ne|sapin|pin|hêtre|chêne)\b", re.IGNORECASE
+)
+CLIENT_FORBIDDEN_RE = re.compile(
+    r"\b(r[eé]alis[eé]\s+par|date\s+du\s+devis|r[eé]f\s+affaire|contact\s+commercial|t[eé]l|fax)\b",
+    re.IGNORECASE,
 )
 
 
@@ -106,30 +107,8 @@ class DevisParser:
         devis_type = devis_match[2] if devis_match else ""
 
         ref_affaire = self._find_ref_affaire(lines)
-        client_details = self._find_client_details(lines, blocks)
-        commercial_details = self._find_commercial_details(lines, blocks)
-        ocr_snapshots = []
-        ocr_used = False
-        if self._is_invalid_client_name(client_details["nom"]) or self._is_invalid_commercial_name(
-            commercial_details["nom"]
-        ):
-            ocr_results = self._run_ocr_fallback(path, blocks, warnings)
-            ocr_snapshots.extend(ocr_results)
-            ocr_text = "\n".join(result["text"] for result in ocr_results if result["text"])
-            ocr_lines = [line.strip() for line in ocr_text.splitlines() if line.strip()]
-            if ocr_lines:
-                ocr_client = self._find_client_details(ocr_lines, None)
-                ocr_commercial = self._find_commercial_details(ocr_lines, None)
-                if self._is_invalid_client_name(client_details["nom"]) and not self._is_invalid_client_name(
-                    ocr_client["nom"]
-                ):
-                    client_details = ocr_client
-                    ocr_used = True
-                if self._is_invalid_commercial_name(
-                    commercial_details["nom"]
-                ) and not self._is_invalid_commercial_name(ocr_commercial["nom"]):
-                    commercial_details = ocr_commercial
-                    ocr_used = True
+        client_details = self._find_client_details(lines)
+        commercial_details = self._find_commercial_details(lines)
         srx_debug = self.debug and "SRX2511AFF037501" in text.replace(" ", "")
         if "réalisé par" in client_details["nom"].lower():
             dump = self._dump_lines_around(lines, client_details.get("code_index"))
@@ -148,19 +127,10 @@ class DevisParser:
                 warnings.append("Client SRX: nom contient 'Réalisé par'.")
             if CP_VILLE_RE.search(commercial_details["nom"]):
                 warnings.append("Client SRX: nom commercial ressemble à un CP/Ville.")
-        source = "OCR" if ocr_used else "TEXT"
         warnings.append(
-            f"DEBUG source={source} client_nom={client_details['nom']} "
+            f"DEBUG source=TEXT client_nom={client_details['nom']} "
             f"commercial_nom={commercial_details['nom']}"
         )
-        if ocr_used and ocr_snapshots:
-            excerpt = " | ".join(
-                snapshot["text"][:160].replace("\n", " ")
-                for snapshot in ocr_snapshots
-                if snapshot.get("text")
-            )
-            if excerpt:
-                warnings.append(f"OCR extrait: {excerpt}")
         if not devis_num:
             warnings.append("Devis SRX introuvable.")
         if not ref_affaire:
@@ -275,7 +245,6 @@ class DevisParser:
         self._debug_cache[path] = {
             "lines": lines,
             "blocks": blocks,
-            "ocr": ocr_snapshots,
         }
         return data
 
@@ -284,19 +253,28 @@ class DevisParser:
             raise FileNotFoundError(path)
         text_parts = []
         blocks = []
-        with fitz.open(path) as doc:
-            for page_index, page in enumerate(doc):
-                page_blocks = page.get_text("blocks") or []
-                page_blocks = sorted(page_blocks, key=lambda block: (block[1], block[0]))
-                for block in page_blocks:
-                    text = (block[4] or "").strip()
+        with pdfplumber.open(path) as doc:
+            for page_index, page in enumerate(doc.pages):
+                page_text = page.extract_text() or ""
+                if page_text:
+                    text_parts.append(page_text)
+                try:
+                    page_lines = page.extract_text_lines()
+                except AttributeError:
+                    page_lines = []
+                for line in page_lines:
+                    text = (line.get("text") or "").strip()
                     if not text:
                         continue
-                    bbox = (block[0], block[1], block[2], block[3])
+                    bbox = (
+                        line.get("x0", 0),
+                        line.get("top", 0),
+                        line.get("x1", 0),
+                        line.get("bottom", 0),
+                    )
                     blocks.append(
                         {"text": text, "bbox": bbox, "page_index": page_index}
                     )
-                    text_parts.append(text)
         text = "\n".join(text_parts)
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         return text, lines, blocks
@@ -367,12 +345,7 @@ class DevisParser:
                 return value
         return ""
 
-    def _find_client_details(self, lines, blocks=None):
-        if blocks:
-            return self._find_client_details_from_blocks(lines, blocks)
-        return self._find_client_details_from_lines(lines)
-
-    def _find_client_details_from_lines(self, lines):
+    def _find_client_details(self, lines):
         code_index = None
         for idx, line in enumerate(lines):
             if "code client" in line.lower():
@@ -413,31 +386,10 @@ class DevisParser:
             if "vaugarny" in lowered:
                 continue
             client_block_lines.append(line)
-        client_nom = ""
+        client_nom = self._find_client_name_above(lines, code_index)
         address_lines = []
         if client_block_lines:
-            first_line = self._clean_line(client_block_lines[0])
-            if self._is_probable_company_name(first_line):
-                client_nom = first_line
-                address_lines = client_block_lines[1:]
-            else:
-                address_lines = client_block_lines
-        if not client_nom:
-            scan_start = max(code_index - 12, 0)
-            for prev in range(code_index - 1, scan_start - 1, -1):
-                candidate = self._clean_line(lines[prev])
-                if not candidate:
-                    continue
-                lowered = candidate.lower()
-                if "vaugarny" in lowered:
-                    continue
-                if CP_VILLE_RE.search(candidate):
-                    continue
-                if NOISE_HEADER_RE.search(lowered):
-                    continue
-                if self._is_probable_company_name(candidate):
-                    client_nom = candidate
-                    break
+            address_lines = client_block_lines
         contact, address_lines = self._extract_contact(address_lines)
         adresse1, adresse2, cp, ville = self._split_address_lines(address_lines)
         tel = self._find_phone(lines[code_index : code_index + 6])
@@ -454,142 +406,8 @@ class DevisParser:
             "code_index": code_index,
         }
 
-    def _find_client_details_from_blocks(self, lines, blocks):
-        code_block = self._find_block_containing(blocks, "code client")
-        code_index = self._find_line_index(lines, "code client")
-        if not code_block:
-            return {
-                "nom": "",
-                "adresse1": "",
-                "adresse2": "",
-                "cp": "",
-                "ville": "",
-                "tel": "",
-                "email": "",
-                "contact": "",
-                "code_index": code_index,
-            }
-        client_nom = ""
-        address_lines = []
-        candidate_block = self._find_nearest_block_above(blocks, code_block)
-        if candidate_block:
-            for line in self._block_lines(candidate_block["text"]):
-                if self._is_probable_company_name(line):
-                    client_nom = line
-                    break
-        for block in self._blocks_below_anchor(blocks, code_block):
-            if not self._is_same_column(block, code_block):
-                continue
-            text_lower = block["text"].lower()
-            if "contact commercial" in text_lower or TEL_MARKER_RE.search(block["text"]):
-                break
-            for line in self._block_lines(block["text"]):
-                if not line:
-                    continue
-                lowered = line.lower()
-                if "code client" in lowered:
-                    continue
-                if self._is_legal_noise(line):
-                    continue
-                if "vaugarny" in lowered:
-                    continue
-                address_lines.append(line)
-        if not client_nom and address_lines:
-            first_line = self._clean_line(address_lines[0])
-            if self._is_probable_company_name(first_line):
-                client_nom = first_line
-                address_lines = address_lines[1:]
-        contact, address_lines = self._extract_contact(address_lines)
-        adresse1, adresse2, cp, ville = self._split_address_lines(address_lines)
-        tel = self._find_phone(lines[code_index : code_index + 6]) if code_index is not None else ""
-        email = self._find_email(lines[code_index : code_index + 6]) if code_index is not None else ""
-        return {
-            "nom": client_nom,
-            "adresse1": adresse1,
-            "adresse2": adresse2,
-            "cp": cp,
-            "ville": ville,
-            "tel": tel,
-            "email": email,
-            "contact": contact,
-            "code_index": code_index,
-        }
-
     def _is_legal_noise(self, line: str) -> bool:
         return LEGAL_NOISE_RE.search(line) is not None
-
-    def _find_line_index(self, lines: list[str], needle: str):
-        needle_lower = needle.lower()
-        for idx, line in enumerate(lines):
-            if needle_lower in line.lower():
-                return idx
-        return None
-
-    def _block_lines(self, text: str) -> list[str]:
-        lines = []
-        for line in text.splitlines():
-            cleaned = self._clean_line(line)
-            if cleaned:
-                lines.append(cleaned)
-        return lines
-
-    def _find_block_containing(self, blocks: list[dict], needle: str):
-        needle_lower = needle.lower()
-        for block in blocks:
-            if needle_lower in block["text"].lower():
-                return block
-        return None
-
-    def _is_same_column(self, block: dict, anchor: dict) -> bool:
-        x0, _, x1, _ = block["bbox"]
-        ax0, _, ax1, _ = anchor["bbox"]
-        overlap = min(x1, ax1) - max(x0, ax0)
-        if overlap > 0:
-            return True
-        center = (x0 + x1) / 2
-        anchor_center = (ax0 + ax1) / 2
-        return abs(center - anchor_center) <= max(40, (ax1 - ax0) * 0.5)
-
-    def _find_nearest_block_above(self, blocks: list[dict], anchor: dict):
-        anchor_page = anchor["page_index"]
-        _, ay0, _, _ = anchor["bbox"]
-        candidates = []
-        for block in blocks:
-            if block["page_index"] != anchor_page:
-                continue
-            _, y0, _, y1 = block["bbox"]
-            if y1 <= ay0 and block is not anchor:
-                distance = ay0 - y1
-                candidates.append((self._is_same_column(block, anchor), distance, block))
-        if not candidates:
-            return None
-        candidates.sort(key=lambda item: (not item[0], item[1]))
-        return candidates[0][2]
-
-    def _find_nearest_block_below(self, blocks: list[dict], anchor: dict):
-        anchor_page = anchor["page_index"]
-        _, _, _, ay1 = anchor["bbox"]
-        candidates = []
-        for block in blocks:
-            if block["page_index"] != anchor_page:
-                continue
-            _, y0, _, _ = block["bbox"]
-            if y0 >= ay1 and block is not anchor:
-                distance = y0 - ay1
-                candidates.append((self._is_same_column(block, anchor), distance, block))
-        if not candidates:
-            return None
-        candidates.sort(key=lambda item: (not item[0], item[1]))
-        return candidates[0][2]
-
-    def _blocks_below_anchor(self, blocks: list[dict], anchor: dict) -> list[dict]:
-        anchor_page = anchor["page_index"]
-        _, _, _, ay1 = anchor["bbox"]
-        return [
-            block
-            for block in blocks
-            if block["page_index"] == anchor_page and block["bbox"][1] >= ay1
-        ]
 
     def _extract_contact(self, lines):
         filtered = []
@@ -655,35 +473,11 @@ class DevisParser:
         upper_count = sum(1 for char in letters if char.isupper())
         return (upper_count / len(letters)) >= 0.6
 
-    def _find_commercial_details(self, lines, blocks=None):
-        if blocks:
-            return self._find_commercial_details_from_blocks(lines, blocks)
-        return self._find_commercial_details_from_lines(lines)
-
-    def _find_commercial_details_from_lines(self, lines):
+    def _find_commercial_details(self, lines):
         for idx, line in enumerate(lines):
             lowered = line.lower()
             if "contact commercial" in lowered:
-                name = ""
-                match = re.search(r"contact commercial\s*:\s*(.+)", line, re.IGNORECASE)
-                if match:
-                    candidate = self._clean_line(match.group(1))
-                    if self._is_valid_commercial_name_candidate(candidate):
-                        name = candidate
-                if not name:
-                    for next_idx in range(idx + 1, min(idx + 9, len(lines))):
-                        candidate = self._clean_line(lines[next_idx])
-                        if self._is_valid_commercial_name_candidate(candidate):
-                            name = candidate
-                            break
-                if not name:
-                    for prev in range(idx - 1, max(idx - 9, -1), -1):
-                        candidate = self._clean_line(lines[prev])
-                        if self._is_valid_commercial_name_candidate(candidate):
-                            name = candidate
-                            break
-                if "contact commercial" in name.lower():
-                    name = ""
+                name = self._find_name_above(lines, idx)
                 search_start = max(idx - 3, 0)
                 search_lines = lines[search_start : idx + 11]
                 return {
@@ -693,42 +487,6 @@ class DevisParser:
                     "contact_index": idx,
                 }
         return {"nom": "", "tel": "", "email": "", "contact_index": None}
-
-    def _find_commercial_details_from_blocks(self, lines, blocks):
-        contact_block = self._find_block_containing(blocks, "contact commercial")
-        contact_index = self._find_line_index(lines, "contact commercial")
-        if not contact_block:
-            return {"nom": "", "tel": "", "email": "", "contact_index": contact_index}
-        name = ""
-        for line in self._block_lines(contact_block["text"]):
-            match = re.search(r"contact commercial\s*:\s*(.+)", line, re.IGNORECASE)
-            if match:
-                candidate = self._clean_line(match.group(1))
-                if self._is_valid_commercial_name_candidate(candidate):
-                    name = candidate
-                    break
-        if not name:
-            below = self._find_nearest_block_below(blocks, contact_block)
-            if below:
-                for line in self._block_lines(below["text"]):
-                    if self._is_valid_commercial_name_candidate(line):
-                        name = line
-                        break
-        if not name:
-            above = self._find_nearest_block_above(blocks, contact_block)
-            if above:
-                for line in self._block_lines(above["text"]):
-                    if self._is_valid_commercial_name_candidate(line):
-                        name = line
-                        break
-        search_start = max(contact_index - 3, 0) if contact_index is not None else 0
-        search_lines = lines[search_start : contact_index + 11] if contact_index is not None else lines
-        return {
-            "nom": name,
-            "tel": self._find_phone(search_lines),
-            "email": self._find_email(search_lines),
-            "contact_index": contact_index,
-        }
 
     def _is_valid_commercial_name_candidate(self, candidate: str) -> bool:
         if not candidate:
@@ -768,84 +526,6 @@ class DevisParser:
         if CP_VILLE_RE.search(cleaned):
             return True
         return not self._is_valid_commercial_name_candidate(cleaned)
-
-    def _build_ocr_zones(self, doc, blocks: list[dict]) -> list[dict]:
-        zones = []
-        code_block = self._find_block_containing(blocks, "code client")
-        contact_block = self._find_block_containing(blocks, "contact commercial")
-        if code_block:
-            page = doc[code_block["page_index"]]
-            page_rect = page.rect
-            _, y0, _, _ = code_block["bbox"]
-            band_height = 90
-            rect = fitz.Rect(
-                page_rect.x0,
-                max(page_rect.y0, y0 - band_height),
-                page_rect.x1,
-                y0,
-            )
-            zones.append(
-                {"page_index": code_block["page_index"], "rect": rect, "label": "code_client_above"}
-            )
-        if contact_block:
-            page = doc[contact_block["page_index"]]
-            page_rect = page.rect
-            _, y0, _, y1 = contact_block["bbox"]
-            rect = fitz.Rect(
-                page_rect.x0,
-                max(page_rect.y0, y0 - 40),
-                page_rect.x1,
-                min(page_rect.y1, y1 + 80),
-            )
-            zones.append(
-                {"page_index": contact_block["page_index"], "rect": rect, "label": "contact_commercial"}
-            )
-        if not code_block:
-            if doc.page_count:
-                page = doc[0]
-                page_rect = page.rect
-                header_rect = fitz.Rect(
-                    page_rect.x0,
-                    page_rect.y0,
-                    page_rect.x1,
-                    min(page_rect.y1, page_rect.y0 + 120),
-                )
-                middle_rect = fitz.Rect(
-                    page_rect.x0,
-                    page_rect.y0 + page_rect.height * 0.35,
-                    page_rect.x1,
-                    page_rect.y0 + page_rect.height * 0.55,
-                )
-                zones.append({"page_index": 0, "rect": header_rect, "label": "fallback_header"})
-                zones.append({"page_index": 0, "rect": middle_rect, "label": "fallback_middle"})
-        return zones[:3]
-
-    def _render_ocr_region(self, page, rect: fitz.Rect) -> Image.Image:
-        pix = page.get_pixmap(clip=rect, dpi=300)
-        mode = "RGBA" if pix.alpha else "RGB"
-        return Image.frombytes(mode, [pix.width, pix.height], pix.samples)
-
-    def _run_ocr_fallback(self, path: Path, blocks: list[dict], warnings: list[str]) -> list[dict]:
-        ocr_results = []
-        try:
-            with fitz.open(path) as doc:
-                zones = self._build_ocr_zones(doc, blocks)
-                for zone in zones:
-                    page = doc[zone["page_index"]]
-                    image = self._render_ocr_region(page, zone["rect"])
-                    text = ocr_image(image, lang="fr")
-                    ocr_results.append(
-                        {
-                            "page_index": zone["page_index"],
-                            "label": zone["label"],
-                            "text": text.strip(),
-                        }
-                    )
-        except OcrNotAvailableError as exc:
-            warnings.append(f"WARNING: OCR Windows indisponible ({exc}).")
-        except Exception as exc:  # pylint: disable=broad-except
-            warnings.append(f"WARNING: échec OCR Windows ({exc}).")
-        return ocr_results
 
     def _find_phone(self, lines):
         for line in lines:
@@ -890,11 +570,6 @@ class DevisParser:
                 bbox = block["bbox"]
                 handle.write(
                     f"[page {block['page_index']}] bbox={bbox} text={block['text']}\n"
-                )
-            handle.write("\n=== OCR ===\n")
-            for snapshot in payload.get("ocr", []):
-                handle.write(
-                    f"[page {snapshot['page_index']}] {snapshot['label']}:\n{snapshot['text']}\n\n"
                 )
         return output_path
 
@@ -984,8 +659,10 @@ class DevisParser:
                 if match:
                     value = match.group(1).strip()
                     value = re.sub(r"\([^)]*\)", "", value).strip()
+                    if "TPA" in value.upper():
+                        return ""
                     return value
-        return "" 
+        return ""
 
     def _find_pose_details(self, lines):
         pose_amount = ""
@@ -1018,4 +695,46 @@ class DevisParser:
             normalized = self._normalize_amount(match)
             if normalized not in {"1,00", "1.00"}:
                 return normalized
+        return ""
+
+    def _find_client_name_above(self, lines: list[str], code_index: int | None) -> str:
+        if code_index is None:
+            return ""
+        start = max(code_index - 8, 0)
+        candidates = lines[start:code_index]
+        for line in reversed(candidates):
+            candidate = self._clean_line(line)
+            if not candidate:
+                continue
+            if ":" in candidate:
+                continue
+            if CLIENT_FORBIDDEN_RE.search(candidate):
+                continue
+            if "vaugarny" in candidate.lower():
+                continue
+            if len(candidate) < 3:
+                continue
+            if not LETTER_RE.search(candidate):
+                continue
+            return candidate
+        return ""
+
+    def _find_name_above(self, lines: list[str], anchor_index: int) -> str:
+        start = max(anchor_index - 8, 0)
+        candidates = lines[start:anchor_index]
+        for line in reversed(candidates):
+            candidate = self._clean_line(line)
+            if not candidate:
+                continue
+            if ":" in candidate:
+                continue
+            if CLIENT_FORBIDDEN_RE.search(candidate):
+                continue
+            if "vaugarny" in candidate.lower():
+                continue
+            if len(candidate) < 3:
+                continue
+            if not LETTER_RE.search(candidate):
+                continue
+            return candidate
         return ""

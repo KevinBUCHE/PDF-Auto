@@ -57,14 +57,18 @@ if getattr(sys, "frozen", False):
     _prepend_path(base)
     _prepend_path(base / "_internal")
     _prepend_path(base / "_internal" / "PySide6")
+    _prepend_path(base / "_internal" / "PySide6" / "Qt" / "bin")
 
     # Chemins Qt spécifiques
     qt_root = base / "_internal" / "PySide6" / "Qt"
     qt_bin = qt_root / "bin"
     qt_plugins = qt_root / "plugins"
+    qt_plugins_fallback = base / "_internal" / "PySide6" / "plugins"
 
     _prepend_path(qt_bin)
     _prepend_path(qt_plugins)
 
     # Variable d'environnement Qt
-    _prepend_env_path("QT_PLUGIN_PATH", qt_plugins)
+    plugins_root = qt_plugins if qt_plugins.exists() else qt_plugins_fallback
+    _prepend_env_path("QT_PLUGIN_PATH", plugins_root)
+    _prepend_env_path("QT_QPA_PLATFORM_PLUGIN_PATH", plugins_root / "platforms")

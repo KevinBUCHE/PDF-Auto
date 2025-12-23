@@ -9,7 +9,7 @@ echo %INFO%[5/6] Build PyInstaller (avec Qt runtime)...%RESET%
 echo Ceci peut prendre 2-3 minutes...
 echo.
 
-pyinstaller ^
+python -m PyInstaller ^
     --name "BDC Generator" ^
     --onedir ^
     --windowed ^

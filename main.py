@@ -81,9 +81,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(900, 600)
 
         self.devis_items = {}
-        self.parser = DevisParser(debug=bool(os.getenv("BDC_DEBUG")))
+        debug_mode = bool(os.getenv("BDC_DEBUG"))
+        self.parser = DevisParser(debug=debug_mode)
         self.pose_detector = PoseDetector()
-        self.bdc_filler = BdcFiller(logger=self.log)
+        self.bdc_filler = BdcFiller(logger=self.log, debug=debug_mode)
         self.base_dir = self._resolve_base_dir()
         self.templates_dir = get_user_templates_dir(APP_NAME)
         self.template_path = get_template_path(APP_NAME)
@@ -123,14 +124,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         buttons_layout = QtWidgets.QHBoxLayout()
         self.generate_button = QtWidgets.QPushButton("Générer les BDC")
-        self.clear_button = QtWidgets.QPushButton("Vider la liste")
-        self.export_debug_button = QtWidgets.QPushButton("Exporter debug")
         self.generate_button.clicked.connect(self.generate_bdcs)
-        self.clear_button.clicked.connect(self.clear_list)
-        self.export_debug_button.clicked.connect(self.export_debug)
         buttons_layout.addWidget(self.generate_button)
-        buttons_layout.addWidget(self.clear_button)
-        buttons_layout.addWidget(self.export_debug_button)
         layout.addLayout(buttons_layout)
 
         self.logs = QtWidgets.QTextEdit()
@@ -194,21 +189,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if not opened:
             self.log("Impossible d'ouvrir le fichier log.")
 
-    def export_debug(self):
-        row = self.table.currentRow()
-        if row < 0:
-            self.log("Sélectionnez un devis pour exporter le debug.")
-            return
-        file_item = self.table.item(row, 0)
-        if not file_item:
-            self.log("Impossible de trouver le devis sélectionné.")
-            return
-        path = Path(file_item.text())
-        exported_path = self.parser.export_debug(path)
-        if not exported_path:
-            self.log(f"Aucune donnée debug disponible pour {path.name}.")
-            return
-        self.log(f"Debug exporté: {exported_path}")
 
     def choose_template_file(self):
         file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -379,11 +359,6 @@ class MainWindow(QtWidgets.QMainWindow):
         devis_item.data["pose_sold"] = pose_sold
         origin_item.setText("Forcé")
         origin_item.setToolTip("Forcé")
-
-    def clear_list(self):
-        self.table.setRowCount(0)
-        self.devis_items = {}
-        self.log("Liste vidée.")
 
     def generate_bdcs(self):
         if not self.template_path.exists():
