@@ -11,7 +11,11 @@ def get_user_data_dir(app_name: str) -> Path:
         if base.name != app_name:
             base = base / app_name
     else:
-        base = Path(os.getenv("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / app_name
+        fallback = os.getenv("APPDATA")
+        if fallback:
+            base = Path(fallback) / app_name
+        else:
+            base = Path(os.getenv("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / app_name
     return base
 
 
