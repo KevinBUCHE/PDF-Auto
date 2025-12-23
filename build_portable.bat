@@ -9,7 +9,7 @@ echo %INFO%[5/6] Build PyInstaller (avec Qt runtime)...%RESET%
 echo Ceci peut prendre 2-3 minutes...
 echo.
 
-pyinstaller ^
+python -m PyInstaller ^
     --name "BDC Generator" ^
     --onedir ^
     --windowed ^
@@ -18,12 +18,15 @@ pyinstaller ^
     --add-data "Templates;Templates" ^
     --collect-all PySide6 ^
     --collect-all shiboken6 ^
+    --collect-all PyMuPDF ^
     --collect-binaries PySide6 ^
     --collect-binaries shiboken6 ^
+    --collect-binaries PyMuPDF ^
     --runtime-hook hooks\runtime_qt_path.py ^
     --hidden-import=PySide6.QtCore ^
     --hidden-import=PySide6.QtGui ^
     --hidden-import=PySide6.QtWidgets ^
+    --hidden-import=fitz ^
     main.py
 
 if errorlevel 1 (

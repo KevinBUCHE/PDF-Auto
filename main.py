@@ -421,7 +421,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _build_output_name(self, data: dict) -> str:
         client_nom = data.get("client_nom", "").strip() or "CLIENT"
-        ref_affaire = data.get("ref_affaire", "").strip() or "Ref INCONNUE"
+        ref_affaire = self._clean_ref_affaire(data.get("ref_affaire", ""))
+        ref_affaire = ref_affaire.strip() or "Ref INCONNUE"
         base = f"CDE {client_nom} Ref {ref_affaire}"
         base = re.sub(r'[\\/:*?"<>|]', " ", base)
         base = re.sub(r"\s+", " ", base).strip()
@@ -429,6 +430,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if len(base) > max_base:
             base = base[:max_base].rstrip()
         return f"{base}.pdf"
+
+    def _clean_ref_affaire(self, value: str) -> str:
+        cleaned = (value or "").strip()
+        cleaned = re.sub(r"^réf\s+affaire\s*:?\s*", "", cleaned, flags=re.IGNORECASE)
+        return cleaned
 
 
 def main():

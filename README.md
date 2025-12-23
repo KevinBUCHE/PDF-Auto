@@ -26,6 +26,12 @@ Application Windows (Python 3.11 + PySide6) pour générer des bons de commande 
    python main.py
    ```
 
+## Tests (fixtures)
+- Vérifier la fixture SRX :
+  ```bash
+  python -m test.run_fixture fixtures/SRX2507AFF046101
+  ```
+
 ## Packaging local (Windows)
 - Build portable : `build_portable.bat`
 - Build installer : `build_installer.bat`

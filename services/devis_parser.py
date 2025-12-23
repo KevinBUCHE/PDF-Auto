@@ -108,6 +108,17 @@ class DevisParser:
         ref_affaire = self._find_ref_affaire(lines)
         client_details = self._find_client_details(lines, blocks)
         commercial_details = self._find_commercial_details(lines, blocks)
+        if self.debug:
+            client_candidates = client_details.get("candidates", [])
+            commercial_candidates = commercial_details.get("candidates", [])
+            warnings.append(
+                "DEBUG client candidates="
+                f"{client_candidates} selected={client_details.get('nom')!r}"
+            )
+            warnings.append(
+                "DEBUG commercial candidates="
+                f"{commercial_candidates} selected={commercial_details.get('nom')!r}"
+            )
         ocr_snapshots = []
         ocr_used = False
         if self._is_invalid_client_name(client_details["nom"]) or self._is_invalid_commercial_name(
@@ -357,13 +368,19 @@ class DevisParser:
                     value = parts[1].strip()
                 else:
                     for next_idx in range(idx + 1, len(lines)):
-                        if lines[next_idx].strip():
-                            value = lines[next_idx].strip()
-                            break
+                        candidate = lines[next_idx].strip()
+                        if not candidate:
+                            continue
+                        if NOISE_HEADER_RE.search(candidate.lower()):
+                            continue
+                        value = candidate
+                        break
                 if not value:
                     return ""
-                if value.lower().startswith("réf affaire"):
+                lowered = value.lower()
+                if lowered.startswith("réf affaire"):
                     value = value.split(":", 1)[-1].strip()
+                value = re.sub(r"^réf\s+affaire\s*:?\s*", "", value, flags=re.IGNORECASE).strip()
                 return value
         return ""
 
@@ -389,6 +406,7 @@ class DevisParser:
                 "email": "",
                 "contact": "",
                 "code_index": None,
+                "candidates": [],
             }
         client_block_lines = []
         for idx in range(code_index + 1, len(lines)):
@@ -396,6 +414,8 @@ class DevisParser:
             if not line:
                 continue
             lowered = line.lower()
+            if NOISE_HEADER_RE.search(lowered):
+                continue
             if "contact commercial" in lowered:
                 stop_at = lowered.find("contact commercial")
                 snippet = line[:stop_at].strip()
@@ -414,16 +434,23 @@ class DevisParser:
                 continue
             client_block_lines.append(line)
         client_nom = ""
+        candidates = []
         address_lines = []
         if client_block_lines:
-            first_line = self._clean_line(client_block_lines[0])
-            if self._is_probable_company_name(first_line):
-                client_nom = first_line
-                address_lines = client_block_lines[1:]
+            for line in client_block_lines:
+                cleaned = self._clean_line(line)
+                if self._is_probable_company_name(cleaned):
+                    candidates.append(cleaned)
+            if candidates:
+                client_nom = candidates[0]
+                address_lines = [
+                    line for line in client_block_lines if self._clean_line(line) != client_nom
+                ]
             else:
                 address_lines = client_block_lines
         if not client_nom:
             scan_start = max(code_index - 12, 0)
+            prev_candidates = []
             for prev in range(code_index - 1, scan_start - 1, -1):
                 candidate = self._clean_line(lines[prev])
                 if not candidate:
@@ -436,8 +463,10 @@ class DevisParser:
                 if NOISE_HEADER_RE.search(lowered):
                     continue
                 if self._is_probable_company_name(candidate):
-                    client_nom = candidate
-                    break
+                    prev_candidates.append(candidate)
+            if prev_candidates:
+                client_nom = prev_candidates[0]
+                candidates = prev_candidates
         contact, address_lines = self._extract_contact(address_lines)
         adresse1, adresse2, cp, ville = self._split_address_lines(address_lines)
         tel = self._find_phone(lines[code_index : code_index + 6])
@@ -452,6 +481,7 @@ class DevisParser:
             "email": email,
             "contact": contact,
             "code_index": code_index,
+            "candidates": candidates,
         }
 
     def _find_client_details_from_blocks(self, lines, blocks):
@@ -468,15 +498,18 @@ class DevisParser:
                 "email": "",
                 "contact": "",
                 "code_index": code_index,
+                "candidates": [],
             }
         client_nom = ""
         address_lines = []
+        candidates = []
         candidate_block = self._find_nearest_block_above(blocks, code_block)
         if candidate_block:
             for line in self._block_lines(candidate_block["text"]):
                 if self._is_probable_company_name(line):
-                    client_nom = line
-                    break
+                    candidates.append(line)
+            if candidates:
+                client_nom = candidates[0]
         for block in self._blocks_below_anchor(blocks, code_block):
             if not self._is_same_column(block, code_block):
                 continue
@@ -489,6 +522,8 @@ class DevisParser:
                 lowered = line.lower()
                 if "code client" in lowered:
                     continue
+                if NOISE_HEADER_RE.search(lowered):
+                    continue
                 if self._is_legal_noise(line):
                     continue
                 if "vaugarny" in lowered:
@@ -499,6 +534,7 @@ class DevisParser:
             if self._is_probable_company_name(first_line):
                 client_nom = first_line
                 address_lines = address_lines[1:]
+                candidates = [client_nom]
         contact, address_lines = self._extract_contact(address_lines)
         adresse1, adresse2, cp, ville = self._split_address_lines(address_lines)
         tel = self._find_phone(lines[code_index : code_index + 6]) if code_index is not None else ""
@@ -513,6 +549,7 @@ class DevisParser:
             "email": email,
             "contact": contact,
             "code_index": code_index,
+            "candidates": candidates,
         }
 
     def _is_legal_noise(self, line: str) -> bool:
@@ -665,23 +702,24 @@ class DevisParser:
             lowered = line.lower()
             if "contact commercial" in lowered:
                 name = ""
+                candidates = []
                 match = re.search(r"contact commercial\s*:\s*(.+)", line, re.IGNORECASE)
                 if match:
                     candidate = self._clean_line(match.group(1))
                     if self._is_valid_commercial_name_candidate(candidate):
-                        name = candidate
+                        candidates.append(candidate)
                 if not name:
                     for next_idx in range(idx + 1, min(idx + 9, len(lines))):
                         candidate = self._clean_line(lines[next_idx])
                         if self._is_valid_commercial_name_candidate(candidate):
-                            name = candidate
-                            break
+                            candidates.append(candidate)
                 if not name:
                     for prev in range(idx - 1, max(idx - 9, -1), -1):
                         candidate = self._clean_line(lines[prev])
                         if self._is_valid_commercial_name_candidate(candidate):
-                            name = candidate
-                            break
+                            candidates.append(candidate)
+                if candidates:
+                    name = self._choose_person_name(candidates)
                 if "contact commercial" in name.lower():
                     name = ""
                 search_start = max(idx - 3, 0)
@@ -691,36 +729,47 @@ class DevisParser:
                     "tel": self._find_phone(search_lines),
                     "email": self._find_email(search_lines),
                     "contact_index": idx,
+                    "candidates": candidates,
                 }
-        return {"nom": "", "tel": "", "email": "", "contact_index": None}
+        return {
+            "nom": "",
+            "tel": "",
+            "email": "",
+            "contact_index": None,
+            "candidates": [],
+        }
 
     def _find_commercial_details_from_blocks(self, lines, blocks):
         contact_block = self._find_block_containing(blocks, "contact commercial")
         contact_index = self._find_line_index(lines, "contact commercial")
         if not contact_block:
-            return {"nom": "", "tel": "", "email": "", "contact_index": contact_index}
+            return {
+                "nom": "",
+                "tel": "",
+                "email": "",
+                "contact_index": contact_index,
+                "candidates": [],
+            }
         name = ""
+        candidates = []
         for line in self._block_lines(contact_block["text"]):
             match = re.search(r"contact commercial\s*:\s*(.+)", line, re.IGNORECASE)
             if match:
                 candidate = self._clean_line(match.group(1))
                 if self._is_valid_commercial_name_candidate(candidate):
-                    name = candidate
-                    break
-        if not name:
-            below = self._find_nearest_block_below(blocks, contact_block)
-            if below:
-                for line in self._block_lines(below["text"]):
-                    if self._is_valid_commercial_name_candidate(line):
-                        name = line
-                        break
-        if not name:
-            above = self._find_nearest_block_above(blocks, contact_block)
-            if above:
-                for line in self._block_lines(above["text"]):
-                    if self._is_valid_commercial_name_candidate(line):
-                        name = line
-                        break
+                    candidates.append(candidate)
+        below = self._find_nearest_block_below(blocks, contact_block)
+        if below:
+            for line in self._block_lines(below["text"]):
+                if self._is_valid_commercial_name_candidate(line):
+                    candidates.append(line)
+        above = self._find_nearest_block_above(blocks, contact_block)
+        if above:
+            for line in self._block_lines(above["text"]):
+                if self._is_valid_commercial_name_candidate(line):
+                    candidates.append(line)
+        if candidates:
+            name = self._choose_person_name(candidates)
         search_start = max(contact_index - 3, 0) if contact_index is not None else 0
         search_lines = lines[search_start : contact_index + 11] if contact_index is not None else lines
         return {
@@ -728,6 +777,7 @@ class DevisParser:
             "tel": self._find_phone(search_lines),
             "email": self._find_email(search_lines),
             "contact_index": contact_index,
+            "candidates": candidates,
         }
 
     def _is_valid_commercial_name_candidate(self, candidate: str) -> bool:
@@ -735,6 +785,8 @@ class DevisParser:
             return False
         cleaned = self._clean_line(candidate)
         lowered = cleaned.lower()
+        if re.search(r"\d", cleaned):
+            return False
         if CP_VILLE_RE.search(cleaned):
             return False
         if "@" in cleaned:
@@ -747,6 +799,26 @@ class DevisParser:
             return False
         words = [word for word in cleaned.split() if LETTER_RE.search(word)]
         return len(words) >= 2
+
+    def _choose_person_name(self, candidates: list[str]) -> str:
+        if not candidates:
+            return ""
+        scored = [(self._score_person_name(value), value) for value in candidates]
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return scored[0][1]
+
+    def _score_person_name(self, value: str) -> int:
+        score = 0
+        words = [word for word in value.split() if word]
+        if 2 <= len(words) <= 3:
+            score += 3
+        if any(word[:1].isupper() and word[1:].islower() for word in words):
+            score += 1
+        if value.isupper():
+            score -= 1
+        if len(words) >= 4:
+            score -= 1
+        return score
 
     def _is_invalid_client_name(self, candidate: str) -> bool:
         if not candidate:

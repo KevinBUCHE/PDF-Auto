@@ -130,6 +130,7 @@ class BdcFiller:
             }
             for page in writer.pages:
                 self._update_page_fields(writer, page, text_values)
+                self._apply_text_values(page, text_values)
 
             checkbox_values = {
                 key: value
@@ -269,6 +270,24 @@ class BdcFiller:
             writer.update_page_form_field_values(page, values, auto_regenerate=True)
         except TypeError:
             writer.update_page_form_field_values(page, values)
+
+    def _apply_text_values(self, page, values: dict) -> None:
+        annots = page.get("/Annots")
+        if not annots:
+            return
+        annots = annots.get_object()
+        for annot in annots:
+            ao = annot.get_object()
+            field_obj, name = self._resolve_field_name(ao)
+            if name not in values:
+                continue
+            value = TextStringObject(values[name])
+            field_obj.update({NameObject("/V"): value, NameObject("/DV"): value})
+            ao.update({NameObject("/V"): value})
+            kids = field_obj.get("/Kids", [])
+            for kid in kids:
+                kid_obj = kid.get_object() if hasattr(kid, "get_object") else kid
+                kid_obj.update({NameObject("/V"): value})
 
     def _resolve_field_name(self, annotation):
         name = annotation.get("/T")
