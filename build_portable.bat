@@ -19,6 +19,7 @@ python -m PyInstaller ^
     --collect-all PySide6 ^
     --collect-all shiboken6 ^
     --collect-all PyMuPDF ^
+    --collect-all Pillow ^
     --collect-binaries PySide6 ^
     --collect-binaries shiboken6 ^
     --collect-binaries PyMuPDF ^
@@ -27,6 +28,7 @@ python -m PyInstaller ^
     --hidden-import=PySide6.QtGui ^
     --hidden-import=PySide6.QtWidgets ^
     --hidden-import=fitz ^
+    --hidden-import=PIL ^
     main.py
 
 if errorlevel 1 (
