@@ -138,6 +138,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(self.logs)
 
         self.setCentralWidget(central)
+        self._apply_control_sizing()
         self.refresh_template_status(log_missing=True)
 
     def log(self, message):
@@ -156,6 +157,19 @@ class MainWindow(QtWidgets.QMainWindow):
         if exists:
             return "Template: OK"
         return "Template: MANQUANT (utilisez 'Choisir un template…')"
+
+    def _apply_control_sizing(self) -> None:
+        buttons = [
+            self.open_templates_button,
+            self.choose_template_button,
+            self.open_log_button,
+            self.generate_button,
+            self.clear_button,
+            self.export_debug_button,
+        ]
+        for button in buttons:
+            button.setMinimumHeight(40)
+        self.logs.setMinimumHeight(160)
 
     def refresh_template_status(self, log_missing: bool = False):
         self.templates_dir.mkdir(parents=True, exist_ok=True)

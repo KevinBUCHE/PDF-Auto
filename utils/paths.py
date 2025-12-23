@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 from pathlib import Path
 
 from PySide6 import QtCore
@@ -28,4 +29,5 @@ def get_logs_dir(app_name: str) -> Path:
 
 
 def get_log_file_path(app_name: str) -> Path:
-    return get_logs_dir(app_name) / "bdc_generator.log"
+    date_stamp = datetime.now().strftime("%Y-%m-%d")
+    return get_logs_dir(app_name) / f"bdc_generator_{date_stamp}.log"
