@@ -3,12 +3,23 @@ from pathlib import Path
 
 import pdfplumber
 
+from services.text_utils import (
+    EMAIL_RE,
+    PHONE_RE,
+    CP_VILLE_RE,
+    extract_email,
+    extract_phones,
+    is_cp_ville,
+    is_email,
+    is_phone,
+    is_riaux_line,
+    normalize_line,
+)
+
 AMOUNT_RE = re.compile(r"([0-9][0-9\s\u202f]*[\.,][0-9]{2})")
-SRX_RE = re.compile(r"SRX(?P<yymm>\d{4})(?P<type>[A-Z]{3})(?P<num>\d{6})")
-EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
-PHONE_RE = re.compile(r"\b(?:\+33|0)\s?\d(?:[\s.-]?\d{2}){4}\b")
-CP_VILLE_RE = re.compile(r"\b(\d{5})\s+(.+)")
+SRX_RE = re.compile(r"SRX(?P<yymm>\d{4})(?P<type>[A-Z]{3})(?P<num>\d{6})", re.IGNORECASE)
 LETTER_RE = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿ]")
+MOBILE_RE = re.compile(r"\b0[67](?:[\s.-]?\d{2}){4}\b")
 
 
 class DevisParser:
@@ -38,7 +49,7 @@ class DevisParser:
             lines, r"TOTAL HORS TAXE\s*:\s*([\d\s]+,\d{2})"
         )
 
-        pose_sold = self._detect_pose(lines)
+        pose_sold, pose_amount = self._detect_pose(lines)
 
         if not devis_num:
             warnings.append("Devis SRX introuvable.")
@@ -46,6 +57,8 @@ class DevisParser:
             warnings.append("Réf affaire introuvable.")
         if not client_details["nom"]:
             warnings.append("Client introuvable (ancre 'Code client :').")
+        if not commercial_details["nom"]:
+            warnings.append("Contact commercial introuvable.")
 
         return {
             "lines": lines,
@@ -69,7 +82,7 @@ class DevisParser:
             "prestations_ht": prestations_ht,
             "total_ht": total_ht,
             "pose_sold": pose_sold,
-            "pose_amount": "",
+            "pose_amount": pose_amount,
             "parse_warning": " ".join(warnings).strip(),
         }
 
@@ -85,15 +98,10 @@ class DevisParser:
                     continue
                 text_parts.append(page_text)
                 for line in page_text.splitlines():
-                    cleaned = self._clean_line(line)
+                    cleaned = normalize_line(line)
                     if cleaned:
                         lines.append(cleaned)
         return "\n".join(text_parts), lines
-
-    def _clean_line(self, value: str) -> str:
-        value = value.replace("\u202f", " ")
-        value = re.sub(r"\s+", " ", value).strip()
-        return value
 
     def _find_amount_by_label(self, lines, pattern):
         regex = re.compile(pattern, re.IGNORECASE)
@@ -104,8 +112,7 @@ class DevisParser:
         return ""
 
     def _normalize_amount(self, value: str) -> str:
-        value = value.replace("\u202f", " ")
-        value = re.sub(r"\s+", " ", value).strip()
+        value = normalize_line(value)
         if "," in value and "." in value:
             value = value.replace(".", "")
         if "." in value:
@@ -114,104 +121,174 @@ class DevisParser:
 
     def _find_devis_reference(self, lines):
         for line in lines:
-            if "DEVIS" not in line.upper():
-                continue
-            match = SRX_RE.search(line.replace(" ", ""))
+            cleaned = re.sub(r"[^A-Za-z0-9]", "", line).upper()
+            match = SRX_RE.search(cleaned)
             if match:
-                return match.group("yymm"), match.group("num"), match.group("type")
+                return (
+                    match.group("yymm"),
+                    match.group("num"),
+                    match.group("type").upper(),
+                )
         return None
 
     def _find_ref_affaire(self, lines):
         for idx, line in enumerate(lines):
-            if "réf affaire" in line.lower():
-                value = self._extract_after_colon(line)
+            if line.lower().startswith("réf affaire"):
+                value = self._extract_ref_affaire(line)
                 if not value:
                     value = self._next_non_empty(lines, idx + 1)
-                return value
+                return value.strip()
         return ""
 
     def _find_client_details(self, lines):
-        block = self._extract_block(lines, r"code client\s*:")
-        return self._parse_contact_block(block)
+        anchor_idx = self._find_anchor_index(lines, "code client")
+        if anchor_idx is None:
+            return self._empty_contact()
+
+        client_nom = self._find_client_name_before_anchor(lines, anchor_idx)
+        details = self._parse_client_block(lines, anchor_idx)
+        details["nom"] = client_nom
+        return details
 
     def _find_commercial_details(self, lines):
-        block = self._extract_block(lines, r"contact commercial\s*:")
-        return self._parse_contact_block(block, allow_two_phones=True)
+        anchor_idx = self._find_anchor_index(lines, "contact commercial")
+        if anchor_idx is None:
+            return self._empty_contact()
+        return self._parse_commercial_block(lines, anchor_idx)
 
-    def _extract_block(self, lines, anchor_pattern: str) -> list[str]:
-        anchor_re = re.compile(anchor_pattern, re.IGNORECASE)
-        stop_markers = [
-            "contact commercial",
-            "réf affaire",
-            "code client",
-            "devis",
-            "prix de la fourniture",
-            "prix prestations",
-            "total hors taxe",
-            "prestations",
-        ]
-        block = []
+    def _find_anchor_index(self, lines: list[str], anchor_text: str) -> int | None:
+        anchor_lower = anchor_text.lower()
         for idx, line in enumerate(lines):
-            if not anchor_re.search(line):
-                continue
-            inline = self._extract_after_colon(line)
-            if inline and self._has_letters(inline):
-                block.append(inline)
-            for next_line in lines[idx + 1 :]:
-                lowered = next_line.lower()
-                if any(marker in lowered for marker in stop_markers):
-                    break
-                if next_line:
-                    block.append(next_line)
-            break
-        return block
+            if anchor_lower in line.lower():
+                return idx
+        return None
 
-    def _parse_contact_block(self, block: list[str], allow_two_phones: bool = False) -> dict:
+    def _find_client_name_before_anchor(self, lines: list[str], anchor_idx: int) -> str:
+        for idx in range(anchor_idx - 1, -1, -1):
+            line = lines[idx].strip()
+            if not line:
+                continue
+            if is_riaux_line(line) or self._is_parasitic_client_line(line):
+                continue
+            if is_cp_ville(line) or not self._has_letters(line):
+                continue
+            return line
+        return ""
+
+    def _parse_client_block(self, lines: list[str], anchor_idx: int) -> dict:
         email = ""
         phones = []
         cp = ""
         ville = ""
-        candidate_lines = []
-        for line in block:
-            line_email = EMAIL_RE.search(line)
-            if line_email and not email:
-                email = line_email.group(0)
-            line_phones = PHONE_RE.findall(line)
-            if line_phones:
-                for phone in line_phones:
-                    if phone not in phones:
-                        phones.append(phone)
-            cp_ville = CP_VILLE_RE.search(line)
-            if cp_ville:
-                cp = cp_ville.group(1)
-                ville = cp_ville.group(2).strip()
+        adresse_lines = []
+        address_done = False
+        for line in lines[anchor_idx + 1 :]:
+            lowered = line.lower()
+            if any(
+                marker in lowered
+                for marker in [
+                    "contact commercial",
+                    "réf affaire",
+                    "prix de la fourniture",
+                    "prix prestations",
+                    "total hors taxe",
+                    "prestations",
+                ]
+            ):
+                break
+
+            if is_riaux_line(line):
                 continue
-            cleaned = EMAIL_RE.sub("", line)
-            cleaned = PHONE_RE.sub("", cleaned)
-            cleaned = cleaned.strip(" -")
-            if cleaned and self._has_letters(cleaned):
-                candidate_lines.append(cleaned)
 
-        nom = candidate_lines[0] if candidate_lines else ""
-        adresse_lines = candidate_lines[1:] if len(candidate_lines) > 1 else []
-        adresse1 = ""
-        adresse2 = ""
-        if len(adresse_lines) == 1:
-            adresse2 = adresse_lines[0]
-        elif len(adresse_lines) >= 2:
-            adresse1 = adresse_lines[0]
-            adresse2 = adresse_lines[1]
+            if any(
+                lowered.startswith(prefix)
+                for prefix in [
+                    "tél",
+                    "tel",
+                    "fax",
+                    "mob",
+                    "mail",
+                    "e mail",
+                    "contact commercial",
+                ]
+            ):
+                address_done = True
 
-        tel = phones[0] if phones else ""
-        tel2 = phones[1] if allow_two_phones and len(phones) > 1 else ""
+            found_email = extract_email(line)
+            if found_email and not email:
+                email = found_email
+            for phone in extract_phones(line):
+                if phone not in phones:
+                    phones.append(phone)
 
+            if not address_done:
+                cp_match = CP_VILLE_RE.search(line)
+                if cp_match:
+                    cp = cp_match.group(1)
+                    ville = cp_match.group(2).strip()
+                    continue
+                if not is_phone(line) and not is_email(line) and self._has_letters(line):
+                    adresse_lines.append(line)
+
+        adresse1 = adresse_lines[0] if len(adresse_lines) >= 1 else ""
+        adresse2 = adresse_lines[1] if len(adresse_lines) >= 2 else ""
         return {
-            "nom": nom,
+            "nom": "",
             "contact": "",
             "adresse1": adresse1,
             "adresse2": adresse2,
             "cp": cp,
             "ville": ville,
+            "tel": phones[0] if phones else "",
+            "tel2": "",
+            "email": email,
+        }
+
+    def _parse_commercial_block(self, lines: list[str], anchor_idx: int) -> dict:
+        email = ""
+        phones = []
+        name = ""
+        for line in lines[anchor_idx + 1 :]:
+            lowered = line.lower()
+            if any(
+                marker in lowered
+                for marker in [
+                    "réf affaire",
+                    "code client",
+                    "prix de la fourniture",
+                    "prix prestations",
+                    "total hors taxe",
+                    "prestations",
+                ]
+            ):
+                break
+            if is_riaux_line(line):
+                continue
+            if not email:
+                found_email = extract_email(line)
+                if found_email:
+                    email = found_email
+            for phone in extract_phones(line):
+                if phone not in phones:
+                    phones.append(phone)
+            if not name and line.strip():
+                if is_cp_ville(line) or is_phone(line) or is_email(line):
+                    continue
+                name = line.strip()
+        tel = self._select_commercial_phone(phones)
+        tel2 = ""
+        if tel and len(phones) > 1:
+            for phone in phones:
+                if phone != tel:
+                    tel2 = phone
+                    break
+        return {
+            "nom": name,
+            "contact": "",
+            "adresse1": "",
+            "adresse2": "",
+            "cp": "",
+            "ville": "",
             "tel": tel,
             "tel2": tel2,
             "email": email,
@@ -223,6 +300,12 @@ class DevisParser:
         value = line.split(":", 1)[1].strip()
         return value
 
+    def _extract_ref_affaire(self, line: str) -> str:
+        match = re.search(r"réf affaire\s*:?\s*(.*)", line, re.IGNORECASE)
+        if not match:
+            return ""
+        return match.group(1).strip()
+
     def _next_non_empty(self, lines: list[str], start: int) -> str:
         for idx in range(start, len(lines)):
             if lines[idx].strip():
@@ -232,12 +315,64 @@ class DevisParser:
     def _has_letters(self, value: str) -> bool:
         return bool(LETTER_RE.search(value))
 
-    def _detect_pose(self, lines: list[str]) -> bool:
+    def _detect_pose(self, lines: list[str]) -> tuple[bool, str]:
         saw_prestations = False
         for line in lines:
             if "PRESTATIONS" in line.upper():
                 saw_prestations = True
                 continue
             if saw_prestations and "pose" in line.lower():
-                return True
+                amount = self._extract_amount_from_line(line)
+                if amount and self._amount_to_float(amount) > 0:
+                    return True, amount
+        return False, ""
+
+    def _extract_amount_from_line(self, line: str) -> str:
+        match = AMOUNT_RE.search(line)
+        if match:
+            return self._normalize_amount(match.group(1))
+        return ""
+
+    def _amount_to_float(self, value: str) -> float:
+        normalized = value.replace("\u202f", " ").replace(" ", "")
+        normalized = normalized.replace(",", ".")
+        try:
+            return float(normalized)
+        except ValueError:
+            return 0.0
+
+    def _select_commercial_phone(self, phones: list[str]) -> str:
+        for phone in phones:
+            if MOBILE_RE.search(phone):
+                return phone
+        return phones[0] if phones else ""
+
+    def _is_parasitic_client_line(self, line: str) -> bool:
+        lowered = line.lower()
+        if lowered.startswith("devis"):
+            return True
+        if any(
+            keyword in lowered
+            for keyword in [
+                "devis n",
+                "réalisé par",
+                "date du devis",
+                "réf affaire",
+                "validité",
+            ]
+        ):
+            return True
         return False
+
+    def _empty_contact(self) -> dict:
+        return {
+            "nom": "",
+            "contact": "",
+            "adresse1": "",
+            "adresse2": "",
+            "cp": "",
+            "ville": "",
+            "tel": "",
+            "tel2": "",
+            "email": "",
+        }
