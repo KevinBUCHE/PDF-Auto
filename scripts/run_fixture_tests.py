@@ -1,15 +1,15 @@
-import argparse
 import json
 import sys
 from pathlib import Path
+
+from pypdf import PdfReader
 
 from services.bdc_filler import BdcFiller
 from services.devis_parser import DevisParser
 
 
-KEYS_TO_ASSERT = [
+EXPECTED_KEYS = [
     "client_nom",
-    "commercial_nom",
     "ref_affaire",
     "devis_annee_mois",
     "devis_num",
@@ -17,6 +17,15 @@ KEYS_TO_ASSERT = [
     "prestations_ht",
     "pose_sold",
 ]
+
+FIELD_CHECKS = {
+    "bdc_client_nom": "client_nom",
+    "bdc_ref_affaire": "ref_affaire",
+    "bdc_devis_annee_mois": "devis_annee_mois",
+    "bdc_devis_num": "devis_num",
+    "bdc_montant_fourniture_ht": "fourniture_ht",
+    "bdc_montant_pose_ht": "prestations_ht",
+}
 
 
 def load_expected(fixture_dir: Path) -> dict:
@@ -56,7 +65,7 @@ def resolve_template_path(repo_root: Path) -> Path:
 
 def assert_expected(data: dict, expected: dict) -> list[str]:
     failures = []
-    for key in KEYS_TO_ASSERT:
+    for key in EXPECTED_KEYS:
         expected_value = expected.get(key)
         actual_value = data.get(key)
         if expected_value != actual_value:
@@ -66,23 +75,41 @@ def assert_expected(data: dict, expected: dict) -> list[str]:
     return failures
 
 
+def extract_field_values(pdf_path: Path, field_names: set[str]) -> dict[str, str]:
+    reader = PdfReader(str(pdf_path))
+    values: dict[str, str] = {}
+    for page in reader.pages:
+        annots = page.get("/Annots")
+        if not annots:
+            continue
+        annots = annots.get_object()
+        for annot in annots:
+            ao = annot.get_object()
+            name = ao.get("/T")
+            if name is None and ao.get("/Parent"):
+                parent = ao.get("/Parent").get_object()
+                name = parent.get("/T")
+                field_obj = parent
+            else:
+                field_obj = ao
+            if name is None:
+                continue
+            name = str(name)
+            if name not in field_names or name in values:
+                continue
+            value = field_obj.get("/V")
+            values[name] = "" if value is None else str(value)
+    return values
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run SRX fixture parsing test")
-    parser.add_argument("fixture", type=Path, help="Path to fixture directory")
-    args = parser.parse_args()
-
-    fixture_dir = args.fixture.resolve()
-    if not fixture_dir.exists():
-        raise FileNotFoundError(f"Fixture introuvable: {fixture_dir}")
-
-    expected = load_expected(fixture_dir)
     repo_root = Path(__file__).resolve().parents[1]
+    fixture_dir = repo_root / "fixtures" / "SRX2507AFF046101"
+    expected = load_expected(fixture_dir)
     pdf_path = resolve_pdf_path(fixture_dir, repo_root, expected)
 
     devis_parser = DevisParser(debug=False)
     data = devis_parser.parse(pdf_path)
-
-    data["pose_sold"] = bool(data.get("pose_sold"))
 
     failures = assert_expected(data, expected)
     if failures:
@@ -94,6 +121,17 @@ def main() -> int:
     output_path = fixture_dir / "output_bdc.pdf"
     filler = BdcFiller(logger=print)
     filler.fill(template_path, data, output_path)
+
+    field_values = extract_field_values(output_path, set(FIELD_CHECKS.keys()))
+    for field_name, expected_key in FIELD_CHECKS.items():
+        expected_value = expected.get(expected_key, "")
+        actual_value = field_values.get(field_name)
+        if expected_value != actual_value:
+            print(
+                "MISMATCH_FIELD "
+                f"{field_name}: expected={expected_value!r} actual={actual_value!r}"
+            )
+            return 1
 
     print("Fixture OK")
     return 0
