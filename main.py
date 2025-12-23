@@ -9,7 +9,6 @@ from pathlib import Path
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from services.devis_parser import DevisParser
-from services.pose_detector import PoseDetector
 from services.bdc_filler import BdcFiller
 from utils.logging_util import append_log
 from utils.paths import (
@@ -38,7 +37,7 @@ class DropTable(QtWidgets.QTableWidget):
         super().__init__(0, 5, parent)
         self.setAcceptDrops(True)
         self.setHorizontalHeaderLabels(
-            ["Fichier devis", "Pose vendue", "Forcer", "Origine", "Statut"]
+            ["Fichier devis", "Pose vendue", "Forcer", "Auto pose", "Statut"]
         )
         header = self.horizontalHeader()
         header.setStretchLastSection(True)
@@ -82,7 +81,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.devis_items = {}
         self.parser = DevisParser(debug=bool(os.getenv("BDC_DEBUG")))
-        self.pose_detector = PoseDetector()
         self.bdc_filler = BdcFiller(logger=self.log)
         self.base_dir = self._resolve_base_dir()
         self.templates_dir = get_user_templates_dir(APP_NAME)
@@ -111,7 +109,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         info_label = QtWidgets.QLabel(
             "Glissez-déposez vos devis PDF SRX*. La pose est détectée automatiquement "
-            "(colonne Origine). Cochez “Forcer” pour ajuster la pose."
+            "(colonne Auto pose). Cochez “Forcer” pour ajuster la pose."
         )
         info_label.setWordWrap(True)
         layout.addWidget(info_label)
@@ -243,21 +241,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 data = self.parser.parse(path)
                 if data.get("parse_warning"):
                     self.log(f"{path.name}: {data['parse_warning']}")
-                pose_sold, pose_amount, pose_status = self.pose_detector.detect_pose(data["lines"])
-                if pose_amount:
-                    data["pose_amount"] = pose_amount
-                data["pose_sold"] = pose_sold
-                self.add_row(path, pose_sold, pose_status)
+                pose_sold = bool(data.get("pose_sold"))
+                self.add_row(path, pose_sold, "auto")
                 self.devis_items[path] = DevisItem(
                     path=path,
                     data=data,
                     pose_sold=pose_sold,
-                    pose_source="auto" if pose_status == "auto" else "unreadable",
+                    pose_source="auto",
                     auto_pose_sold=pose_sold,
-                    auto_pose_status=pose_status,
+                    auto_pose_status="auto",
                 )
-                if pose_status == "unreadable":
-                    self.log(f"{path.name}: détection pose impossible, valeur par défaut = non.")
                 self.log(f"Ajouté: {path.name} (pose: {'oui' if pose_sold else 'non'})")
                 if "SRX2511AFF037501" in path.name:
                     self.log(
@@ -389,7 +382,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.template_path.exists():
             self.refresh_template_status(log_missing=True)
             return
-        output_dir = self.base_dir / "BDC_Output"
+        output_dir = Path.home() / "Desktop" / "BDC_Output"
         output_dir.mkdir(exist_ok=True)
 
         for row in range(self.table.rowCount()):

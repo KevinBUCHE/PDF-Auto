@@ -1,10 +1,3 @@
 PySide6==6.7.2
-PyMuPDF==1.24.9
-Pillow==10.4.0
+pdfplumber==0.11.4
 pypdf==4.2.0
-pymupdf==1.24.9
-Pillow==10.4.0
-winrt==1.0.21033.1
-winrt-Windows.Media.Ocr==1.0.0
-winrt-Windows.Graphics.Imaging==1.0.0
-winrt-Windows.Storage.Streams==1.0.0

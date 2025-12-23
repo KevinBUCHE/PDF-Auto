@@ -73,8 +73,9 @@ CHECKBOX_FIELDS = {
 }
 
 CRITICAL_FIELDS = {
-    "bdc_devis_annee_mois",
+    "bdc_client_nom",
     "bdc_devis_num",
+    "bdc_ref_affaire",
 }
 
 
@@ -100,7 +101,8 @@ class BdcFiller:
             field_names = self._collect_field_names(reader)
             bdc_fields = {name for name in field_names if str(name).startswith("bdc_")}
             self._log(f"Champs bdc_* détectés: {len(bdc_fields)}")
-            self._log(f"Liste champs bdc_*: {sorted(bdc_fields)}")
+            if self._logger:
+                self._log(f"Liste champs bdc_*: {sorted(bdc_fields)}")
 
             fields = self._build_fields(data)
             checkbox_states = self._build_checkbox_states(data)
@@ -164,8 +166,8 @@ class BdcFiller:
                 output_path,
                 [
                     "bdc_client_nom",
-                    "bdc_date_commande",
                     "bdc_devis_num",
+                    "bdc_ref_affaire",
                 ],
             )
         except Exception as exc:
