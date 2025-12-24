@@ -10,6 +10,8 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from services.devis_parser import DevisParser
 from services.bdc_filler import BdcFiller
+from services.address_sanitizer import sanitize_client_address
+from services.gemini_extractor import DEFAULT_GEMINI_MODEL, GeminiExtractor
 from utils.logging_util import append_log
 from utils.paths import (
     get_log_file_path,
@@ -87,6 +89,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.template_path = get_template_path(APP_NAME)
         self.bundled_template_path = self.base_dir / "Templates" / "bon de commande V1.pdf"
         self.log_file_path = get_log_file_path(APP_NAME)
+        self.settings = QtCore.QSettings(APP_NAME, APP_NAME)
+        self.gemini_api_key = ""
+        self.gemini_model = DEFAULT_GEMINI_MODEL
+        self.gemini_extractor: GeminiExtractor | None = None
+        self._load_gemini_settings()
         self._loading_table = False
 
         central = QtWidgets.QWidget()
@@ -97,14 +104,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.open_templates_button = QtWidgets.QPushButton("Ouvrir le dossier Templates")
         self.choose_template_button = QtWidgets.QPushButton("Choisir un template…")
         self.open_log_button = QtWidgets.QPushButton("Ouvrir le log")
+        self.gemini_settings_button = QtWidgets.QPushButton("Paramètres Gemini")
         self.open_templates_button.clicked.connect(self.open_templates_folder)
         self.choose_template_button.clicked.connect(self.choose_template_file)
         self.open_log_button.clicked.connect(self.open_log_file)
+        self.gemini_settings_button.clicked.connect(self.open_gemini_settings)
         template_layout.addWidget(self.template_status)
         template_layout.addStretch()
         template_layout.addWidget(self.open_templates_button)
         template_layout.addWidget(self.choose_template_button)
         template_layout.addWidget(self.open_log_button)
+        template_layout.addWidget(self.gemini_settings_button)
         layout.addLayout(template_layout)
 
         info_label = QtWidgets.QLabel(
@@ -226,6 +236,64 @@ class MainWindow(QtWidgets.QMainWindow):
     def _is_srx_pdf(self, path: Path) -> bool:
         return path.suffix.lower() == ".pdf" and path.name.upper().startswith("SRX")
 
+    def _load_gemini_settings(self):
+        self.gemini_api_key = str(self.settings.value("gemini/api_key", "") or "")
+        self.gemini_model = str(
+            self.settings.value("gemini/model", DEFAULT_GEMINI_MODEL)
+            or DEFAULT_GEMINI_MODEL
+        )
+        self.gemini_extractor = None
+
+    def _get_gemini_extractor(self) -> GeminiExtractor | None:
+        if self.gemini_extractor is not None:
+            return self.gemini_extractor
+        if not self.gemini_api_key:
+            return None
+        try:
+            self.gemini_extractor = GeminiExtractor(
+                api_key=self.gemini_api_key,
+                model=self.gemini_model,
+                logger=self.log,
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            self.log(f"Erreur initialisation Gemini: {exc}")
+            self.gemini_extractor = None
+        return self.gemini_extractor
+
+    def _merge_data(self, base: dict, override: dict | None) -> dict:
+        if not override:
+            return base
+        merged = dict(base)
+        for key, value in override.items():
+            if value in ("", None, []):
+                continue
+            merged[key] = value
+        return merged
+
+    def _extract_data(self, path: Path) -> tuple[dict, str]:
+        data = self.parser.parse(path)
+        pose_status = "auto"
+        extractor = self._get_gemini_extractor()
+        if extractor:
+            try:
+                text = "\n".join(data.get("lines", []))
+                result = extractor.extract_from_text(text)
+                data = self._merge_data(data, result.data)
+                pose_status = "gemini"
+            except Exception as exc:  # pylint: disable=broad-except
+                self.log(f"Gemini ignoré pour {path.name}: {exc}")
+        data = sanitize_client_address(data)
+        if data.get("parse_warning"):
+            self.log(f"{path.name}: {data['parse_warning']}")
+        return data, pose_status
+
+    def _origin_text(self, pose_status: str) -> str:
+        if pose_status == "gemini":
+            return "Gemini"
+        if pose_status == "auto":
+            return "Auto"
+        return "À vérifier"
+
     def handle_files_dropped(self, paths):
         for path in paths:
             if self._is_template_file(path):
@@ -238,18 +306,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.log(f"Déjà ajouté: {path}")
                 continue
             try:
-                data = self.parser.parse(path)
-                if data.get("parse_warning"):
-                    self.log(f"{path.name}: {data['parse_warning']}")
+                data, pose_status = self._extract_data(path)
                 pose_sold = bool(data.get("pose_sold"))
-                self.add_row(path, pose_sold, "auto")
+                self.add_row(path, pose_sold, pose_status)
                 self.devis_items[path] = DevisItem(
                     path=path,
                     data=data,
                     pose_sold=pose_sold,
-                    pose_source="auto",
+                    pose_source=pose_status,
                     auto_pose_sold=pose_sold,
-                    auto_pose_status="auto",
+                    auto_pose_status=pose_status,
                 )
                 self.log(f"Ajouté: {path.name} (pose: {'oui' if pose_sold else 'non'})")
                 if "SRX2511AFF037501" in path.name:
@@ -303,9 +369,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._set_pose_editable(row, False)
 
-        origin_item = QtWidgets.QTableWidgetItem(
-            "Auto" if pose_status == "auto" else "À vérifier"
-        )
+        origin_item = QtWidgets.QTableWidgetItem(self._origin_text(pose_status))
         origin_item.setFlags(origin_item.flags() ^ QtCore.Qt.ItemIsEditable)
         origin_item.setToolTip(origin_item.text())
         self.table.setItem(row, 3, origin_item)
@@ -354,13 +418,9 @@ class MainWindow(QtWidgets.QMainWindow):
                         else QtCore.Qt.Unchecked
                     )
                 devis_item.pose_sold = devis_item.auto_pose_sold
-                devis_item.pose_source = "auto"
+                devis_item.pose_source = devis_item.auto_pose_status
                 devis_item.data["pose_sold"] = devis_item.auto_pose_sold
-                origin_text = (
-                    "Auto"
-                    if devis_item.auto_pose_status == "auto"
-                    else "À vérifier"
-                )
+                origin_text = self._origin_text(devis_item.auto_pose_status)
                 origin_item.setText(origin_text)
                 origin_item.setToolTip(origin_text)
             return
@@ -401,7 +461,8 @@ class MainWindow(QtWidgets.QMainWindow):
             try:
                 output_name = self._build_output_name(item.data)
                 output_path = output_dir / output_name
-                self.bdc_filler.fill(self.template_path, item.data, output_path)
+                cleaned_data = sanitize_client_address(item.data)
+                self.bdc_filler.fill(self.template_path, cleaned_data, output_path)
                 status_item.setText("OK")
                 self.log(f"BDC généré: {output_path}")
             except Exception as exc:  # pylint: disable=broad-except
@@ -428,6 +489,74 @@ class MainWindow(QtWidgets.QMainWindow):
         cleaned = (value or "").strip()
         cleaned = re.sub(r"^réf\s+affaire\s*:?\s*", "", cleaned, flags=re.IGNORECASE)
         return cleaned
+
+    def open_gemini_settings(self):
+        dialog = GeminiSettingsDialog(
+            parent=self,
+            settings=self.settings,
+            logger=self.log,
+        )
+        if dialog.exec():
+            self._load_gemini_settings()
+            self.log("Paramètres Gemini enregistrés.")
+
+
+class GeminiSettingsDialog(QtWidgets.QDialog):
+    def __init__(
+        self,
+        parent: QtWidgets.QWidget | None,
+        settings: QtCore.QSettings,
+        logger,
+    ):
+        super().__init__(parent)
+        self.settings = settings
+        self.logger = logger
+        self.setWindowTitle("Paramètres Gemini")
+        self.setModal(True)
+
+        layout = QtWidgets.QFormLayout(self)
+
+        self.api_key_edit = QtWidgets.QLineEdit()
+        self.api_key_edit.setEchoMode(QtWidgets.QLineEdit.Password)
+        self.api_key_edit.setText(str(self.settings.value("gemini/api_key", "") or ""))
+        layout.addRow("Clé API Gemini", self.api_key_edit)
+
+        self.model_edit = QtWidgets.QLineEdit()
+        self.model_edit.setText(
+            str(
+                self.settings.value("gemini/model", DEFAULT_GEMINI_MODEL)
+                or DEFAULT_GEMINI_MODEL
+            )
+        )
+        layout.addRow("Modèle Gemini", self.model_edit)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+        )
+        test_button = QtWidgets.QPushButton("Tester la clé")
+        buttons.addButton(test_button, QtWidgets.QDialogButtonBox.ActionRole)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        test_button.clicked.connect(self._test_key)
+        layout.addRow(buttons)
+
+    def accept(self):
+        self.settings.setValue("gemini/api_key", self.api_key_edit.text().strip())
+        model = self.model_edit.text().strip() or DEFAULT_GEMINI_MODEL
+        self.settings.setValue("gemini/model", model)
+        super().accept()
+
+    def _test_key(self):
+        api_key = self.api_key_edit.text().strip()
+        model = self.model_edit.text().strip() or DEFAULT_GEMINI_MODEL
+        try:
+            extractor = GeminiExtractor(api_key=api_key, model=model, logger=self.logger)
+            extractor.test_model()
+            QtWidgets.QMessageBox.information(
+                self, "Test clé Gemini", f"Test clé Gemini OK (model={model})"
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            QtWidgets.QMessageBox.critical(self, "Test clé Gemini", str(exc))
 
 
 def main():
