@@ -3,6 +3,8 @@ from pathlib import Path
 
 import pdfplumber
 
+from services.sanitize import sanitize_client_data, validate_client_extraction
+
 AMOUNT_RE = re.compile(r"([0-9][0-9\s\u202f]*[\.,][0-9]{2})")
 SRX_RE = re.compile(r"SRX(?P<yymm>\d{4})(?P<type>[A-Z]{3})(?P<num>\d{6})")
 EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
@@ -47,7 +49,8 @@ class DevisParser:
         if not client_details["nom"]:
             warnings.append("Client introuvable (ancre 'Code client :').")
 
-        return {
+        # Build result dictionary
+        result = {
             "lines": lines,
             "devis_annee_mois": devis_annee_mois,
             "devis_num": devis_num,
@@ -72,6 +75,17 @@ class DevisParser:
             "pose_amount": "",
             "parse_warning": " ".join(warnings).strip(),
         }
+        
+        # Sanitize client data to prevent RIAUX contamination
+        result = sanitize_client_data(result)
+        
+        # Validate no RIAUX contamination
+        contamination_warnings = validate_client_extraction(result)
+        if contamination_warnings:
+            warnings.extend(contamination_warnings)
+            result["parse_warning"] = " ".join(warnings).strip()
+        
+        return result
 
     def _extract_text(self, path: Path) -> tuple[str, list[str]]:
         if not path.exists():
