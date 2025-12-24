@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import shutil
@@ -8,14 +9,17 @@ from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from services.devis_parser import DevisParser
 from services.bdc_filler import BdcFiller
+from services.devis_parser import DevisParser
+from services.extraction_validator import safe_json_dumps, validate_and_normalize
+from services.gemini_extractor import GeminiExtractor
 from utils.logging_util import append_log
 from utils.paths import (
     get_log_file_path,
     get_template_path,
     get_user_templates_dir,
 )
+from utils.settings_store import AppSettings, load_settings, save_settings
 
 APP_NAME = "BDC Generator"
 
@@ -73,6 +77,58 @@ class DropTable(QtWidgets.QTableWidget):
             super().dropEvent(event)
 
 
+class SettingsDialog(QtWidgets.QDialog):
+    def __init__(self, parent, settings: AppSettings, tester):
+        super().__init__(parent)
+        self.setWindowTitle("Paramètres Gemini")
+        self.resize(420, 200)
+        self.settings = settings
+        self._tester = tester
+
+        layout = QtWidgets.QVBoxLayout(self)
+
+        key_label = QtWidgets.QLabel("Gemini API Key")
+        self.key_edit = QtWidgets.QLineEdit(settings.gemini_api_key)
+        self.key_edit.setEchoMode(QtWidgets.QLineEdit.Password)
+        self.key_edit.setPlaceholderText("Collez la clé Gemini (jamais loggée)")
+        layout.addWidget(key_label)
+        layout.addWidget(self.key_edit)
+
+        self.use_gemini_checkbox = QtWidgets.QCheckBox("Utiliser Gemini pour l'extraction SRX")
+        self.use_gemini_checkbox.setChecked(settings.use_gemini or bool(settings.gemini_api_key))
+        layout.addWidget(self.use_gemini_checkbox)
+
+        buttons_layout = QtWidgets.QHBoxLayout()
+        self.test_button = QtWidgets.QPushButton("Tester la clé")
+        self.save_button = QtWidgets.QPushButton("Enregistrer")
+        self.cancel_button = QtWidgets.QPushButton("Annuler")
+        buttons_layout.addWidget(self.test_button)
+        buttons_layout.addStretch()
+        buttons_layout.addWidget(self.cancel_button)
+        buttons_layout.addWidget(self.save_button)
+        layout.addLayout(buttons_layout)
+
+        self.test_button.clicked.connect(self._handle_test)
+        self.save_button.clicked.connect(self.accept)
+        self.cancel_button.clicked.connect(self.reject)
+
+    def _handle_test(self):
+        key = self.key_edit.text().strip()
+        try:
+            ok = self._tester(key)
+            QtWidgets.QMessageBox.information(
+                self,
+                "Test Gemini",
+                "Clé valide, réponse OK." if ok else "Réponse inattendue.",
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Test Gemini",
+                f"Erreur lors du test: {exc}",
+            )
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
@@ -81,6 +137,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.devis_items = {}
         self.parser = DevisParser(debug=bool(os.getenv("BDC_DEBUG")))
+        self.gemini_extractor = GeminiExtractor(
+            logger=self.log, debug=bool(os.getenv("BDC_DEBUG"))
+        )
         self.bdc_filler = BdcFiller(logger=self.log)
         self.base_dir = self._resolve_base_dir()
         self.templates_dir = get_user_templates_dir(APP_NAME)
@@ -88,6 +147,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bundled_template_path = self.base_dir / "Templates" / "bon de commande V1.pdf"
         self.log_file_path = get_log_file_path(APP_NAME)
         self._loading_table = False
+        self.settings = self._load_app_settings()
 
         central = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(central)
@@ -96,14 +156,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.template_status = QtWidgets.QLabel()
         self.open_templates_button = QtWidgets.QPushButton("Ouvrir le dossier Templates")
         self.choose_template_button = QtWidgets.QPushButton("Choisir un template…")
+        self.settings_button = QtWidgets.QPushButton("Paramètres")
         self.open_log_button = QtWidgets.QPushButton("Ouvrir le log")
         self.open_templates_button.clicked.connect(self.open_templates_folder)
         self.choose_template_button.clicked.connect(self.choose_template_file)
+        self.settings_button.clicked.connect(self.open_settings_dialog)
         self.open_log_button.clicked.connect(self.open_log_file)
         template_layout.addWidget(self.template_status)
         template_layout.addStretch()
         template_layout.addWidget(self.open_templates_button)
         template_layout.addWidget(self.choose_template_button)
+        template_layout.addWidget(self.settings_button)
         template_layout.addWidget(self.open_log_button)
         layout.addLayout(template_layout)
 
@@ -123,12 +186,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.generate_button = QtWidgets.QPushButton("Générer les BDC")
         self.clear_button = QtWidgets.QPushButton("Vider la liste")
         self.export_debug_button = QtWidgets.QPushButton("Exporter debug")
+        self.test_extraction_button = QtWidgets.QPushButton("Test extraction (fixture)")
         self.generate_button.clicked.connect(self.generate_bdcs)
         self.clear_button.clicked.connect(self.clear_list)
         self.export_debug_button.clicked.connect(self.export_debug)
+        self.test_extraction_button.clicked.connect(self.run_extraction_test)
         buttons_layout.addWidget(self.generate_button)
         buttons_layout.addWidget(self.clear_button)
         buttons_layout.addWidget(self.export_debug_button)
+        buttons_layout.addWidget(self.test_extraction_button)
         layout.addLayout(buttons_layout)
 
         self.logs = QtWidgets.QTextEdit()
@@ -144,6 +210,20 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def log_to_file(self, message):
         append_log(self.log_file_path, message)
+
+    def _load_app_settings(self) -> AppSettings:
+        settings = load_settings(APP_NAME)
+        if settings.gemini_api_key and not settings.use_gemini:
+            settings.use_gemini = True
+        return settings
+
+    def _get_gemini_key(self) -> str:
+        return (
+            self.settings.gemini_api_key
+            or os.getenv("GEMINI_API_KEY")
+            or os.getenv("GOOGLE_API_KEY")
+            or ""
+        )
 
     def _resolve_base_dir(self) -> Path:
         if getattr(sys, "frozen", False):
@@ -192,6 +272,22 @@ class MainWindow(QtWidgets.QMainWindow):
         if not opened:
             self.log("Impossible d'ouvrir le fichier log.")
 
+    def open_settings_dialog(self):
+        dialog = SettingsDialog(self, AppSettings(**self.settings.to_dict()), self._test_gemini_key)
+        if dialog.exec() == QtWidgets.QDialog.Accepted:
+            self.settings.gemini_api_key = dialog.key_edit.text().strip()
+            self.settings.use_gemini = dialog.use_gemini_checkbox.isChecked() and bool(
+                self.settings.gemini_api_key or self._get_gemini_key()
+            )
+            save_settings(APP_NAME, self.settings)
+            status = "activé" if self.settings.use_gemini else "désactivé"
+            self.log(f"Paramètres Gemini enregistrés ({status}).")
+        else:
+            self.log("Paramètres Gemini non modifiés.")
+
+    def _test_gemini_key(self, key: str) -> bool:
+        return self.gemini_extractor.test_key(key or self._get_gemini_key())
+
     def export_debug(self):
         row = self.table.currentRow()
         if row < 0:
@@ -207,6 +303,20 @@ class MainWindow(QtWidgets.QMainWindow):
             self.log(f"Aucune donnée debug disponible pour {path.name}.")
             return
         self.log(f"Debug exporté: {exported_path}")
+
+    def extract_data(self, path: Path) -> dict:
+        key = self._get_gemini_key()
+        if self.settings.use_gemini and key:
+            try:
+                return self.gemini_extractor.extract_srx_json(path, api_key=key)
+            except Exception as exc:  # pylint: disable=broad-except
+                self.log(
+                    f"Gemini indisponible pour {path.name}: {exc}. "
+                    "Fallback extraction locale."
+                )
+                self.log_to_file(traceback.format_exc())
+        raw = self.parser.parse(path)
+        return validate_and_normalize(raw, raw.get("lines", []))
 
     def choose_template_file(self):
         file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -238,7 +348,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.log(f"Déjà ajouté: {path}")
                 continue
             try:
-                data = self.parser.parse(path)
+                data = self.extract_data(path)
                 if data.get("parse_warning"):
                     self.log(f"{path.name}: {data['parse_warning']}")
                 pose_sold = bool(data.get("pose_sold"))
@@ -411,6 +521,27 @@ class MainWindow(QtWidgets.QMainWindow):
                     f"Erreur génération {path.name}: {exc.__class__.__name__}: {short_message}"
                 )
                 self.log_to_file(traceback.format_exc())
+
+    def run_extraction_test(self):
+        fixture_pdf = self.base_dir / "fixtures" / "SRX2507AFF046101" / "SRX2507AFF046101_20250731_153004.pdf"
+        if not fixture_pdf.exists():
+            self.log("Fixture introuvable pour le test d'extraction.")
+            return
+        try:
+            data = self.extract_data(fixture_pdf)
+            self.log("[Test extraction] Données normalisées :")
+            self.log(safe_json_dumps(data))
+            checks = [
+                ("client_cp != 35560", data.get("client_cp") != "35560"),
+                ("client_ville ne contient pas BAZOUGES", "bazouges" not in data.get("client_ville", "").lower()),
+                ("commercial_nom non vide", bool(data.get("commercial_nom"))),
+                ("client_nom valide", "devis" not in data.get("client_nom", "").lower()),
+            ]
+            for label, ok in checks:
+                self.log(f"[Test] {label}: {'OK' if ok else 'KO'}")
+        except Exception as exc:  # pylint: disable=broad-except
+            self.log(f"Erreur test extraction: {exc}")
+            self.log_to_file(traceback.format_exc())
 
     def _build_output_name(self, data: dict) -> str:
         client_nom = data.get("client_nom", "").strip() or "CLIENT"

@@ -1,10 +1,13 @@
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
 from services.bdc_filler import BdcFiller
 from services.devis_parser import DevisParser
+from services.extraction_validator import validate_and_normalize
+from services.gemini_extractor import GeminiExtractor
 
 
 KEYS_TO_ASSERT = [
@@ -79,8 +82,14 @@ def main() -> int:
     repo_root = Path(__file__).resolve().parents[1]
     pdf_path = resolve_pdf_path(fixture_dir, repo_root, expected)
 
-    devis_parser = DevisParser(debug=False)
-    data = devis_parser.parse(pdf_path)
+    key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if key:
+        extractor = GeminiExtractor(debug=True, logger=print)
+        data = extractor.extract_srx_json(pdf_path, api_key=key)
+    else:
+        devis_parser = DevisParser(debug=False)
+        raw = devis_parser.parse(pdf_path)
+        data = validate_and_normalize(raw, raw.get("lines", []))
 
     data["pose_sold"] = bool(data.get("pose_sold"))
 
