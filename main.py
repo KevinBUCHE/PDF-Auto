@@ -10,6 +10,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from services.devis_parser import DevisParser
 from services.bdc_filler import BdcFiller
+from services.gemini_extractor import GeminiExtractor
 from utils.logging_util import append_log
 from utils.paths import (
     get_log_file_path,
@@ -107,6 +108,21 @@ class MainWindow(QtWidgets.QMainWindow):
         template_layout.addWidget(self.open_log_button)
         layout.addLayout(template_layout)
 
+        gemini_layout = QtWidgets.QHBoxLayout()
+        gemini_label = QtWidgets.QLabel("Clé Gemini")
+        self.gemini_api_input = QtWidgets.QLineEdit()
+        self.gemini_api_input.setEchoMode(QtWidgets.QLineEdit.Password)
+        self.gemini_api_input.setPlaceholderText("Clé API Gemini")
+        env_key = os.getenv("GEMINI_API_KEY") or os.getenv("BDC_GEMINI_API_KEY")
+        if env_key:
+            self.gemini_api_input.setText(env_key)
+        self.test_gemini_button = QtWidgets.QPushButton("Tester la clé")
+        self.test_gemini_button.clicked.connect(self.test_gemini_key)
+        gemini_layout.addWidget(gemini_label)
+        gemini_layout.addWidget(self.gemini_api_input, 1)
+        gemini_layout.addWidget(self.test_gemini_button)
+        layout.addLayout(gemini_layout)
+
         info_label = QtWidgets.QLabel(
             "Glissez-déposez vos devis PDF SRX*. La pose est détectée automatiquement "
             "(colonne Auto pose). Cochez “Forcer” pour ajuster la pose."
@@ -191,6 +207,49 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if not opened:
             self.log("Impossible d'ouvrir le fichier log.")
+
+    def test_gemini_key(self):
+        api_key = self.gemini_api_input.text().strip()
+        if not api_key:
+            QtWidgets.QMessageBox.warning(self, "Test Gemini", "KO : clé manquante")
+            return
+
+        try:
+            extractor = GeminiExtractor(api_key=api_key, logger=self._log_gemini)
+            result = extractor.test_key()
+            status = result.get("status") if isinstance(result, dict) else None
+            status_suffix = f" ({status})" if status else ""
+            self.log(f"Test clé Gemini: OK{status_suffix}")
+            QtWidgets.QMessageBox.information(self, "Test Gemini", "OK")
+        except Exception as exc:  # pylint: disable=broad-except
+            short_reason = self._format_exception_short(exc)
+            sanitized = self._sanitize_api_key(short_reason, api_key)
+            display_reason = (
+                f"{exc.__class__.__name__}: {sanitized}"
+                if sanitized
+                else exc.__class__.__name__
+            )
+            self.log(f"Test clé Gemini KO: {display_reason}")
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Test Gemini",
+                f"KO : {display_reason}",
+            )
+
+    def _log_gemini(self, message: str):
+        sanitized = self._sanitize_api_key(
+            message, self.gemini_api_input.text().strip()
+        )
+        self.log(sanitized)
+
+    def _sanitize_api_key(self, message: str, api_key: str) -> str:
+        if not message or not api_key:
+            return message
+        return message.replace(api_key, "***")
+
+    def _format_exception_short(self, exc: Exception) -> str:
+        message = str(exc).strip()
+        return message or exc.__class__.__name__
 
     def export_debug(self):
         row = self.table.currentRow()
