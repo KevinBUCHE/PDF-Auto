@@ -10,7 +10,6 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from services.devis_parser import DevisParser
 from services.bdc_filler import BdcFiller
-from services.address_sanitizer import sanitize_client_address
 from services.data_normalizer import normalize_extracted_data
 from services.gemini_extractor import DEFAULT_GEMINI_MODEL, GeminiExtractor
 from utils.logging_util import append_log
@@ -19,6 +18,7 @@ from utils.paths import (
     get_template_path,
     get_user_templates_dir,
 )
+from utils.settings_service import SettingsService
 
 APP_NAME = "BDC Generator"
 
@@ -90,11 +90,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.template_path = get_template_path(APP_NAME)
         self.bundled_template_path = self.base_dir / "Templates" / "bon de commande V1.pdf"
         self.log_file_path = get_log_file_path(APP_NAME)
-        self.settings = QtCore.QSettings(APP_NAME, APP_NAME)
-        self.gemini_api_key = ""
-        self.gemini_model = DEFAULT_GEMINI_MODEL
+        self.settings_service = SettingsService(APP_NAME)
+        self.settings = self.settings_service.load()
+        self.gemini_api_key = self.settings.get("gemini_api_key", "")
+        self.gemini_model = self.settings.get("gemini_model", DEFAULT_GEMINI_MODEL)
+        self.gemini_enabled = bool(self.settings.get("gemini_enabled"))
         self.gemini_extractor: GeminiExtractor | None = None
-        self._load_gemini_settings()
         self._loading_table = False
 
         central = QtWidgets.QWidget()
@@ -106,6 +107,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.choose_template_button = QtWidgets.QPushButton("Choisir un template…")
         self.open_log_button = QtWidgets.QPushButton("Ouvrir le log")
         self.gemini_settings_button = QtWidgets.QPushButton("Paramètres Gemini")
+        self.gemini_toggle = QtWidgets.QLabel()
         self.open_templates_button.clicked.connect(self.open_templates_folder)
         self.choose_template_button.clicked.connect(self.choose_template_file)
         self.open_log_button.clicked.connect(self.open_log_file)
@@ -116,6 +118,7 @@ class MainWindow(QtWidgets.QMainWindow):
         template_layout.addWidget(self.choose_template_button)
         template_layout.addWidget(self.open_log_button)
         template_layout.addWidget(self.gemini_settings_button)
+        template_layout.addWidget(self.gemini_toggle)
         layout.addLayout(template_layout)
 
         info_label = QtWidgets.QLabel(
@@ -238,12 +241,15 @@ class MainWindow(QtWidgets.QMainWindow):
         return path.suffix.lower() == ".pdf" and path.name.upper().startswith("SRX")
 
     def _load_gemini_settings(self):
-        self.gemini_api_key = str(self.settings.value("gemini/api_key", "") or "")
+        self.settings = self.settings_service.load()
+        self.gemini_api_key = str(self.settings.get("gemini_api_key", "") or "")
         self.gemini_model = str(
-            self.settings.value("gemini/model", DEFAULT_GEMINI_MODEL)
-            or DEFAULT_GEMINI_MODEL
+            self.settings.get("gemini_model", DEFAULT_GEMINI_MODEL) or DEFAULT_GEMINI_MODEL
         )
+        self.gemini_enabled = bool(self.settings.get("gemini_enabled"))
         self.gemini_extractor = None
+        state = "activé" if self.gemini_enabled and self.gemini_api_key else "désactivé"
+        self.gemini_toggle.setText(f"Gemini: {state}")
 
     def _get_gemini_extractor(self) -> GeminiExtractor | None:
         if self.gemini_extractor is not None:
@@ -274,8 +280,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _extract_data(self, path: Path) -> tuple[dict, str]:
         data = self.parser.parse(path)
         pose_status = "auto"
-        extractor = self._get_gemini_extractor()
-        if extractor:
+        extractor = self._get_gemini_extractor() if self.gemini_enabled else None
+        if extractor and self.gemini_api_key:
             try:
                 text = "\n".join(data.get("lines", []))
                 result = extractor.extract_from_text(text)
@@ -496,6 +502,7 @@ class MainWindow(QtWidgets.QMainWindow):
             parent=self,
             settings=self.settings,
             logger=self.log,
+            settings_service=self.settings_service,
         )
         if dialog.exec():
             self._load_gemini_settings()
@@ -506,30 +513,30 @@ class GeminiSettingsDialog(QtWidgets.QDialog):
     def __init__(
         self,
         parent: QtWidgets.QWidget | None,
-        settings: QtCore.QSettings,
+        settings: dict,
         logger,
+        settings_service,
     ):
         super().__init__(parent)
         self.settings = settings
+        self.settings_service = settings_service
         self.logger = logger
         self.setWindowTitle("Paramètres Gemini")
         self.setModal(True)
 
         layout = QtWidgets.QFormLayout(self)
 
+        self.enabled_checkbox = QtWidgets.QCheckBox("Utiliser Gemini pour l'extraction SRX")
+        self.enabled_checkbox.setChecked(bool(self.settings.get("gemini_enabled")))
+        layout.addRow(self.enabled_checkbox)
+
         self.api_key_edit = QtWidgets.QLineEdit()
         self.api_key_edit.setEchoMode(QtWidgets.QLineEdit.Password)
-        self.api_key_edit.setText(str(self.settings.value("gemini/api_key", "") or ""))
+        self.api_key_edit.setText(str(self.settings.get("gemini_api_key", "") or ""))
         layout.addRow("Clé API Gemini", self.api_key_edit)
 
-        self.model_edit = QtWidgets.QLineEdit()
-        self.model_edit.setText(
-            str(
-                self.settings.value("gemini/model", DEFAULT_GEMINI_MODEL)
-                or DEFAULT_GEMINI_MODEL
-            )
-        )
-        layout.addRow("Modèle Gemini", self.model_edit)
+        self.model_label = QtWidgets.QLabel(DEFAULT_GEMINI_MODEL)
+        layout.addRow("Modèle Gemini", self.model_label)
 
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
@@ -542,14 +549,18 @@ class GeminiSettingsDialog(QtWidgets.QDialog):
         layout.addRow(buttons)
 
     def accept(self):
-        self.settings.setValue("gemini/api_key", self.api_key_edit.text().strip())
-        model = self.model_edit.text().strip() or DEFAULT_GEMINI_MODEL
-        self.settings.setValue("gemini/model", model)
+        self.settings_service.save(
+            {
+                "gemini_enabled": self.enabled_checkbox.isChecked(),
+                "gemini_api_key": self.api_key_edit.text().strip(),
+                "gemini_model": DEFAULT_GEMINI_MODEL,
+            }
+        )
         super().accept()
 
     def _test_key(self):
         api_key = self.api_key_edit.text().strip()
-        model = self.model_edit.text().strip() or DEFAULT_GEMINI_MODEL
+        model = DEFAULT_GEMINI_MODEL
         try:
             extractor = GeminiExtractor(api_key=api_key, model=model, logger=self.logger)
             extractor.test_model()

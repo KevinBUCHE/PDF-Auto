@@ -1,16 +1,9 @@
-import importlib.util
 import json
 import re
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from typing import Callable, Optional
-
-_genai_spec = importlib.util.find_spec("google.generativeai")
-if _genai_spec:
-    import google.generativeai as genai
-    from google.api_core import exceptions as google_exceptions
-else:
-    from services import gemini_stub as genai
-    from services.gemini_stub import exceptions as google_exceptions
 
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 
@@ -37,31 +30,52 @@ class GeminiExtractor:
         if callable(self._logger):
             self._logger(message)
 
-    def _ensure_model(self):
-        if not self.api_key:
-            raise ValueError("Clé Gemini manquante.")
-        if self._model is not None:
-            return
-        genai.configure(api_key=self.api_key)
-        try:
-            self._model = genai.GenerativeModel(self.model_name)
-        except (google_exceptions.NotFound, ValueError) as exc:
-            raise ValueError(f"Model not found / not supported: {self.model_name} (Modèle non disponible)") from exc
-        self._log(f"Gemini model used: {self.model_name}")
-
-    def _generation_config(self) -> dict:
+    def _build_request(self, prompt: str) -> dict:
         return {
-            "temperature": 0,
-            "response_mime_type": "application/json",
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0,
+                "responseMimeType": "application/json",
+            },
         }
 
     def _call_model(self, prompt: str) -> str:
-        self._ensure_model()
-        response = self._model.generate_content(
-            prompt,
-            generation_config=self._generation_config(),
+        if not self.api_key:
+            raise ValueError("Clé Gemini manquante.")
+        body = json.dumps(self._build_request(prompt)).encode("utf-8")
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent"
+            f"?key={self.api_key}"
         )
-        text = getattr(response, "text", "") or ""
+        request = urllib.request.Request(
+            url,
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            self._log(f"Gemini model used: {self.model_name} (payload chars={len(prompt)})")
+            with urllib.request.urlopen(request) as response:
+                payload = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:  # pragma: no cover
+            error_detail = exc.read().decode("utf-8") if hasattr(exc, "read") else str(exc)
+            raise ValueError(f"Appel Gemini KO: {exc.reason}: {error_detail}") from exc
+        except urllib.error.URLError as exc:  # pragma: no cover
+            raise ValueError(f"Appel Gemini KO: {exc.reason}") from exc
+
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Réponse Gemini illisible: {exc}") from exc
+        candidates = (data.get("candidates") or [])
+        if not candidates:
+            raise ValueError("Réponse Gemini vide.")
+        parts = candidates[0].get("content", {}).get("parts") or []
+        text_chunks = []
+        for part in parts:
+            if "text" in part:
+                text_chunks.append(part["text"])
+        text = "\n".join(text_chunks).strip()
         if not text:
             raise ValueError("Réponse Gemini vide.")
         return text
@@ -81,8 +95,25 @@ class GeminiExtractor:
         try:
             return json.loads(cleaned)
         except json.JSONDecodeError:
-            repaired = self._repair_json(cleaned)
+            repaired = self._extract_first_json_object(cleaned)
+            if not repaired:
+                repaired = self._repair_json(cleaned)
             return json.loads(repaired)
+
+    def _extract_first_json_object(self, text: str) -> str:
+        brace_stack = []
+        start_idx = None
+        for idx, char in enumerate(text):
+            if char == "{":
+                if start_idx is None:
+                    start_idx = idx
+                brace_stack.append(char)
+            elif char == "}":
+                if brace_stack:
+                    brace_stack.pop()
+                    if not brace_stack and start_idx is not None:
+                        return text[start_idx : idx + 1]
+        return ""
 
     def _repair_json(self, broken_json: str) -> str:
         prompt = (
@@ -116,6 +147,7 @@ class GeminiExtractor:
         prompt = self._build_prompt(text)
         raw = self._call_model(prompt)
         data = self._parse_json(raw)
+        self._log("Gemini JSON OK")
         return GeminiResult(data=data, raw_text=raw)
 
     def test_model(self) -> dict:

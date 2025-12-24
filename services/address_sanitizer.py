@@ -6,11 +6,16 @@ POLLUTION_PATTERNS = [
     r"BAZOUGES",
     r"LA PEROUSE",
     r"\b35560\b",
+    r"\b77100\b",
+    r"MAREUIL LES MEAUX",
+    r"RIAUX",
+    r"groupe-riaux\.fr",
     r"RCS RENNES",
     r"NAF 1623Z",
     r"SAS au capital",
     r"Tél\s*:\s*02\s*99\s*97\s*45\s*40",
     r"t.?l\s*:",
+    r"fax\s*:",
 ]
 
 CP_VILLE_RE = re.compile(r"\b(\d{5})\s+(.+)")
