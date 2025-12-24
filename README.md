@@ -17,19 +17,28 @@ Take a SRX PDF quote from RIAUX and generate a purchase order PDF by filling the
 
 ### Prerequisites
 - Python 3.11+ (tested with 3.12)
+- pip (Python package installer)
 
 ### Setup
+
+⚠️ **IMPORTANT**: You must install dependencies before running the application.
+
 ```bash
 # Clone the repository
 git clone https://github.com/KevinBUCHE/PDF-Auto.git
 cd PDF-Auto
 
-# Install dependencies
+# Install dependencies (REQUIRED)
 pip install -r requirements.txt
+
+# Verify installation
+python main.py --version
 
 # Ensure template exists
 # Place your template at: Templates/bon de commande V1.pdf
 ```
+
+If you get `ModuleNotFoundError`, make sure you ran `pip install -r requirements.txt` first.
 
 ## Usage
 
@@ -125,6 +134,34 @@ Example: `CDE BERVAL MAISONS Ref SALEIX.pdf`
 
 - `pdfplumber==0.11.4`: PDF text extraction
 - `pypdf==4.2.0`: PDF form filling
+
+## Troubleshooting
+
+### "ModuleNotFoundError: No module named 'pdfplumber'" or "No module named 'pypdf'"
+
+This means dependencies are not installed. Run:
+```bash
+pip install -r requirements.txt
+```
+
+### "Template PDF not found"
+
+Ensure `Templates/bon de commande V1.pdf` exists in your repository.
+
+### "Not a SRX file"
+
+The application only processes PDF files starting with "SRX" in the filename.
+
+### Verify Installation
+
+To verify everything is set up correctly:
+```bash
+# Should display version
+python main.py --version
+
+# Run tests
+python -m unittest discover tests -q
+```
 
 ## License
 
