@@ -29,3 +29,7 @@ def get_logs_dir(app_name: str) -> Path:
 
 def get_log_file_path(app_name: str) -> Path:
     return get_logs_dir(app_name) / "bdc_generator.log"
+
+
+def get_settings_path(app_name: str) -> Path:
+    return get_user_data_dir(app_name) / "settings.json"

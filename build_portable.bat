@@ -27,6 +27,7 @@ python -m PyInstaller ^
     --hidden-import=PySide6.QtGui ^
     --hidden-import=PySide6.QtWidgets ^
     --hidden-import=fitz ^
+    --hidden-import=google.genai ^
     main.py
 
 if errorlevel 1 (
