@@ -54,7 +54,7 @@ def is_riaux_contaminated(text: str) -> bool:
     
     # Check forbidden patterns
     for pattern in RIAUX_FORBIDDEN_PATTERNS:
-        if re.search(pattern, text_upper, re.IGNORECASE):
+        if re.search(pattern, text_upper):
             return True
     
     return False

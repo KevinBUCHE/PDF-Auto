@@ -7,6 +7,7 @@ and validates that RIAUX information is never injected into client fields.
 
 import unittest
 from pathlib import Path
+
 from services.devis_parser import DevisParser
 from services.sanitize import is_riaux_contaminated, validate_client_extraction
 

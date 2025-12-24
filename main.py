@@ -20,7 +20,9 @@ Key Features:
 """
 
 import argparse
+import re
 import sys
+import traceback
 from pathlib import Path
 from datetime import datetime
 
@@ -141,14 +143,11 @@ class BdcGeneratorCLI:
         except Exception as exc:
             self.error(f"Failed to process {devis_path.name}: {exc}")
             if self.verbose:
-                import traceback
                 traceback.print_exc()
             return False
     
     def _build_output_name(self, data: dict) -> str:
         """Build output filename from devis data"""
-        import re
-        
         client_nom = data.get("client_nom", "").strip() or "CLIENT"
         ref_affaire = data.get("ref_affaire", "").strip() or "REF"
         
@@ -304,7 +303,6 @@ Examples:
     except Exception as exc:
         cli.error(f"Unexpected error: {exc}")
         if args.verbose:
-            import traceback
             traceback.print_exc()
         return 1
 
