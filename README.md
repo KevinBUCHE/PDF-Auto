@@ -1,54 +1,137 @@
 # BDC Generator
 
-Application Windows (Python 3.11 + PySide6) pour générer des bons de commande (BDC) à partir de devis PDF.
+**Simple CLI application** to generate purchase orders (BDC) from SRX quote PDFs.
 
-## Fonctionnalités
-- Drag & drop de devis PDF.
-- Liste des devis avec toggle AVEC/SANS pose.
-- Bouton "Générer" pour produire les BDC.
-- Logs lisibles.
+## Objective
 
-## Structure
-- `main.py` : interface et orchestration.
-- `services/` : parsing devis, détection de pose, remplissage BDC.
-- `Templates/` : template PDF (non versionné).
-- `installer/` : script Inno Setup.
-- `.github/workflows/` : build Windows + installer + ZIP.
+Take a SRX PDF quote from RIAUX and generate a purchase order PDF by filling the AcroForm template: `Templates/bon de commande V1.pdf`.
 
-## Prérequis
-- Python 3.11
-- Dépendances : `pip install -r requirements.txt`
+## Key Features
 
-## Lancement local
-1. Placez le template PDF : `Templates/bon de commande V1.pdf`
-2. Lancez l'app :
-   ```bash
-   python main.py
-   ```
+- **Robust extraction**: CLIENT / COMMERCIAL / RÉF AFFAIRE / MONTANTS from SRX PDFs
+- **RIAUX contamination prevention**: Ensures RIAUX company information (address, phone, registration) is NEVER injected into client fields
+- **Simple CLI interface**: No GUI, command-line only
+- **Minimal dependencies**: Only pdfplumber and pypdf
 
-## Tests (fixtures)
-- Vérifier la fixture SRX :
-  ```bash
-  python -m test.run_fixture fixtures/SRX2507AFF046101
-  ```
+## Installation
 
-## Packaging local (Windows)
-- Build portable : `build_portable.bat`
-- Build installer : `build_installer.bat`
-- ZIP release : `make_release_zip.bat`
+### Prerequisites
+- Python 3.11+ (tested with 3.12)
 
-## CI/CD GitHub Actions
-Le workflow **Build Windows Installer** produit un ZIP `BDC_Generator.zip` contenant :
-- `BDC_Generator_Setup_User.exe`
-- `README_Installation.txt`
+### Setup
+```bash
+# Clone the repository
+git clone https://github.com/KevinBUCHE/PDF-Auto.git
+cd PDF-Auto
 
-### Où cliquer
-GitHub → **Actions** → **Build Windows Installer** → **Run workflow** → télécharger l'artifact.
+# Install dependencies
+pip install -r requirements.txt
 
-## Notes importantes
-- Le template `Templates/bon de commande V1.pdf` est requis. Le workflow échoue si absent.
-- Le PDF de sortie n'est jamais aplati.
-- NeedAppearances est activé.
+# Ensure template exists
+# Place your template at: Templates/bon de commande V1.pdf
+```
 
-## Documentation complète
-Voir `GUIDE_COMPLET.md`.
+## Usage
+
+### Basic Usage
+```bash
+# Process a single devis
+python main.py SRX2511AFF037501.pdf
+
+# Process multiple devis
+python main.py SRX*.pdf
+
+# Verbose mode
+python main.py -v SRX2511AFF037501.pdf
+```
+
+### Batch Processing
+```bash
+# Process all SRX PDFs in a directory
+python main.py --batch ./devis_folder
+
+# Specify output directory
+python main.py --output ./my_output --batch ./devis_folder
+```
+
+### Options
+- `-b, --batch DIR`: Process all SRX PDFs in directory
+- `-o, --output DIR`: Output directory (default: ./BDC_Output)
+- `-v, --verbose`: Verbose output
+- `--version`: Show version
+
+## Project Structure
+
+```
+PDF-Auto/
+├── main.py                      # CLI application entry point
+├── services/
+│   ├── devis_parser.py         # SRX PDF parsing with RIAUX filtering
+│   ├── bdc_filler.py           # AcroForm template filling
+│   └── sanitize.py             # RIAUX contamination prevention
+├── tests/
+│   ├── test_parser.py          # Parser unit tests
+│   ├── test_fill.py            # Filler unit tests
+│   └── run_fixture.py          # Fixture-based integration test
+├── fixtures/                    # Test fixtures
+├── Templates/                   # BDC template location
+│   └── bon de commande V1.pdf  # Required template
+└── requirements.txt             # Minimal dependencies
+```
+
+## Testing
+
+### Run Unit Tests
+```bash
+# Run all tests
+python -m unittest discover tests
+
+# Run parser tests
+python -m unittest tests.test_parser
+
+# Run filler tests
+python -m unittest tests.test_fill
+```
+
+### Run Fixture Tests
+```bash
+python -m tests.run_fixture fixtures/SRX2507AFF046101
+```
+
+## Key Constraints
+
+1. **Simplicity > Everything**: Minimal dependencies, clear code
+2. **CLI First**: No GUI, command-line interface only
+3. **Robust Extraction**: Reliable parsing of CLIENT, COMMERCIAL, RÉF AFFAIRE, and MONTANTS
+4. **RIAUX Contamination Prevention**: **ABSOLUTE PROHIBITION** - NEVER inject RIAUX information (VAUGARNY, 35560 BAZOUGES LA PEROUSE, RCS/NAF/tel/etc.) into client fields
+
+## Template Requirements
+
+The template `Templates/bon de commande V1.pdf` must:
+- Be an AcroForm PDF with named fields
+- Include critical fields: `bdc_client_nom`, `bdc_devis_num`, `bdc_ref_affaire`
+- Support checkbox fields for delivery options
+
+## Output
+
+Generated BDCs are saved to `BDC_Output/` (or specified directory) with naming format:
+```
+CDE <CLIENT_NOM> Ref <REF_AFFAIRE>.pdf
+```
+
+Example: `CDE BERVAL MAISONS Ref SALEIX.pdf`
+
+## Dependencies
+
+- `pdfplumber==0.11.4`: PDF text extraction
+- `pypdf==4.2.0`: PDF form filling
+
+## License
+
+See repository license file.
+
+## Notes
+
+- The PDF output is never flattened (remains editable)
+- NeedAppearances is activated for proper form rendering
+- Pose detection is automatic based on PRESTATIONS section content
