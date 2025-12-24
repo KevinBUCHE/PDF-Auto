@@ -4,19 +4,13 @@ from pathlib import Path
 
 from pypdf import PdfReader
 
+repo_root = Path(__file__).resolve().parents[1]
+if str(repo_root) not in sys.path:
+    sys.path.insert(0, str(repo_root))
+
 from services.bdc_filler import BdcFiller
 from services.devis_parser import DevisParser
-
-
-EXPECTED_KEYS = [
-    "client_nom",
-    "ref_affaire",
-    "devis_annee_mois",
-    "devis_num",
-    "fourniture_ht",
-    "prestations_ht",
-    "pose_sold",
-]
+from services.extraction_normalizer import normalize_extracted_data
 
 FIELD_CHECKS = {
     "bdc_client_nom": "client_nom",
@@ -65,9 +59,12 @@ def resolve_template_path(repo_root: Path) -> Path:
 
 def assert_expected(data: dict, expected: dict) -> list[str]:
     failures = []
-    for key in EXPECTED_KEYS:
-        expected_value = expected.get(key)
-        actual_value = data.get(key)
+    for key, expected_value in expected.items():
+        if key == "source_pdf":
+            continue
+        actual_value = data.get(key, "")
+        if actual_value is None:
+            actual_value = ""
         if expected_value != actual_value:
             failures.append(
                 f"MISMATCH {key}: expected={expected_value!r} actual={actual_value!r}"
@@ -104,37 +101,48 @@ def extract_field_values(pdf_path: Path, field_names: set[str]) -> dict[str, str
 
 def main() -> int:
     repo_root = Path(__file__).resolve().parents[1]
-    fixture_dir = repo_root / "fixtures" / "SRX2507AFF046101"
-    expected = load_expected(fixture_dir)
-    pdf_path = resolve_pdf_path(fixture_dir, repo_root, expected)
+    fixtures_root = repo_root / "fixtures"
+    fixture_dirs = [path for path in sorted(fixtures_root.iterdir()) if path.is_dir()]
+    exit_code = 0
+    for fixture_dir in fixture_dirs:
+        expected = load_expected(fixture_dir)
+        try:
+            pdf_path = resolve_pdf_path(fixture_dir, repo_root, expected)
+        except FileNotFoundError as exc:
+            print(f"[SKIP] {fixture_dir.name}: {exc}")
+            continue
 
-    devis_parser = DevisParser(debug=False)
-    data = devis_parser.parse(pdf_path)
+        devis_parser = DevisParser(debug=False)
+        data = normalize_extracted_data(devis_parser.parse(pdf_path))
 
-    failures = assert_expected(data, expected)
-    if failures:
-        for failure in failures:
-            print(failure)
-        return 1
+        failures = assert_expected(data, expected)
+        if failures:
+            print(f"[FAIL] {fixture_dir.name}")
+            for failure in failures:
+                print(failure)
+            exit_code = 1
+            continue
 
-    template_path = resolve_template_path(repo_root)
-    output_path = fixture_dir / "output_bdc.pdf"
-    filler = BdcFiller(logger=print)
-    filler.fill(template_path, data, output_path)
+        template_path = resolve_template_path(repo_root)
+        output_path = fixture_dir / "output_bdc.pdf"
+        filler = BdcFiller(logger=print)
+        filler.fill(template_path, data, output_path)
 
-    field_values = extract_field_values(output_path, set(FIELD_CHECKS.keys()))
-    for field_name, expected_key in FIELD_CHECKS.items():
-        expected_value = expected.get(expected_key, "")
-        actual_value = field_values.get(field_name)
-        if expected_value != actual_value:
-            print(
-                "MISMATCH_FIELD "
-                f"{field_name}: expected={expected_value!r} actual={actual_value!r}"
-            )
-            return 1
+        field_values = extract_field_values(output_path, set(FIELD_CHECKS.keys()))
+        for field_name, expected_key in FIELD_CHECKS.items():
+            expected_value = expected.get(expected_key, "")
+            actual_value = field_values.get(field_name)
+            if expected_value != actual_value:
+                print(
+                    "[FAIL_FIELD] "
+                    f"{fixture_dir.name} {field_name}: expected={expected_value!r} actual={actual_value!r}"
+                )
+                exit_code = 1
+                break
+        else:
+            print(f"[OK] {fixture_dir.name}")
 
-    print("Fixture OK")
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":

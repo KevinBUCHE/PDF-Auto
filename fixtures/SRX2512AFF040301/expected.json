@@ -1,0 +1,19 @@
+{
+  "source_pdf": "fixtures/SRX2512AFF040301/SRX2512AFF040301.pdf",
+  "devis_annee_mois": "2512",
+  "devis_type": "AFF",
+  "devis_num": "040301",
+  "ref_affaire": "TEST_FAC",
+  "fourniture_ht": "2 464,71",
+  "prestations_ht": "0,00",
+  "total_ht": "2 464,71",
+  "pose_sold": false,
+  "client_nom": "CLIENT TEST",
+  "client_adresse": "1 rue Exemple",
+  "client_adresse1": "",
+  "client_adresse2": "1 rue Exemple",
+  "client_cp": "",
+  "client_ville": "",
+  "commercial_nom": "BUCHE Kevin",
+  "parse_warning": ""
+}
