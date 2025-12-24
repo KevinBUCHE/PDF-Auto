@@ -5,18 +5,7 @@ from pathlib import Path
 
 from services.bdc_filler import BdcFiller
 from services.devis_parser import DevisParser
-
-
-KEYS_TO_ASSERT = [
-    "client_nom",
-    "commercial_nom",
-    "ref_affaire",
-    "devis_annee_mois",
-    "devis_num",
-    "fourniture_ht",
-    "prestations_ht",
-    "pose_sold",
-]
+from services.extraction_normalizer import normalize_extracted_data
 
 
 def load_expected(fixture_dir: Path) -> dict:
@@ -56,9 +45,12 @@ def resolve_template_path(repo_root: Path) -> Path:
 
 def assert_expected(data: dict, expected: dict) -> list[str]:
     failures = []
-    for key in KEYS_TO_ASSERT:
-        expected_value = expected.get(key)
-        actual_value = data.get(key)
+    for key, expected_value in expected.items():
+        if key == "source_pdf":
+            continue
+        actual_value = data.get(key, "")
+        if actual_value is None:
+            actual_value = ""
         if expected_value != actual_value:
             failures.append(
                 f"MISMATCH {key}: expected={expected_value!r} actual={actual_value!r}"
@@ -81,6 +73,7 @@ def main() -> int:
 
     devis_parser = DevisParser(debug=False)
     data = devis_parser.parse(pdf_path)
+    data = normalize_extracted_data(data)
 
     data["pose_sold"] = bool(data.get("pose_sold"))
 

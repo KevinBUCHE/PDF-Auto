@@ -3,6 +3,8 @@ from pathlib import Path
 
 import pdfplumber
 
+from services.extraction_normalizer import normalize_extracted_data
+
 AMOUNT_RE = re.compile(r"([0-9][0-9\s\u202f]*[\.,][0-9]{2})")
 SRX_RE = re.compile(r"SRX(?P<yymm>\d{4})(?P<type>[A-Z]{3})(?P<num>\d{6})")
 EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
@@ -29,13 +31,13 @@ class DevisParser:
         commercial_details = self._find_commercial_details(lines)
 
         fourniture_ht = self._find_amount_by_label(
-            lines, r"PRIX DE LA FOURNITURE HT\s*:\s*([\d\s]+,\d{2})"
+            lines, r"PRIX DE LA FOURNITURE HT\s*:\s*([\d\s\u202f]+[.,]\d{2})"
         )
         prestations_ht = self._find_amount_by_label(
-            lines, r"PRIX PRESTATIONS ET SERVICES HT\s*:\s*([\d\s]+,\d{2})"
+            lines, r"PRIX PRESTATIONS ET SERVICES HT\s*:\s*([\d\s\u202f]+[.,]\d{2})"
         )
         total_ht = self._find_amount_by_label(
-            lines, r"TOTAL HORS TAXE\s*:\s*([\d\s]+,\d{2})"
+            lines, r"TOTAL HORS TAXE\s*:\s*([\d\s\u202f]+[.,]\d{2})"
         )
 
         pose_sold = self._detect_pose(lines)
@@ -47,7 +49,7 @@ class DevisParser:
         if not client_details["nom"]:
             warnings.append("Client introuvable (ancre 'Code client :').")
 
-        return {
+        data = {
             "lines": lines,
             "devis_annee_mois": devis_annee_mois,
             "devis_num": devis_num,
@@ -72,6 +74,7 @@ class DevisParser:
             "pose_amount": "",
             "parse_warning": " ".join(warnings).strip(),
         }
+        return normalize_extracted_data(data)
 
     def _extract_text(self, path: Path) -> tuple[str, list[str]]:
         if not path.exists():
@@ -123,7 +126,8 @@ class DevisParser:
 
     def _find_ref_affaire(self, lines):
         for idx, line in enumerate(lines):
-            if "réf affaire" in line.lower():
+            lowered = line.lower()
+            if "réf affaire" in lowered or "ref affaire" in lowered:
                 value = self._extract_after_colon(line)
                 if not value:
                     value = self._next_non_empty(lines, idx + 1)
