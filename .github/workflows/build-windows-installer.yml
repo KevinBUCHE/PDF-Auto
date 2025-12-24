@@ -1,4 +1,4 @@
-name: Build BDC Generator
+name: Build and Test CLI
 
 on:
   push:
@@ -8,8 +8,49 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-windows:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify installation
+        run: |
+          python main.py --version
+
+      - name: Run tests
+        run: |
+          python -m unittest discover tests -v
+
+      - name: Test CLI with fixture
+        shell: bash
+        run: |
+          if [ -f "fixtures/SRX2507AFF046101/SRX2507AFF046101_20250731_153004.pdf" ]; then
+            python main.py fixtures/SRX2507AFF046101/SRX2507AFF046101_20250731_153004.pdf
+          else
+            echo "Fixture PDF not found, skipping CLI test"
+          fi
+
+  build-executable:
+    needs: test
     runs-on: windows-latest
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
 
     steps:
       - name: Checkout code
@@ -22,156 +63,61 @@ jobs:
           cache: "pip"
 
       - name: Install dependencies
-        shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
-
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
-
-          # Force GUI deps (avoid "ModuleNotFoundError: PySide6")
-          python -m pip install "PySide6==6.6.3" "shiboken6==6.6.3"
-
-          # Force PyInstaller (avoid "pyinstaller not recognized")
-          python -m pip install "pyinstaller>=6.0"
-
-          python -m pip show PySide6
-          python -m pip show shiboken6
-          python -m pip show pyinstaller
-
-          python -c "import PySide6; print('PySide6 version:', PySide6.__version__)"
-          python -c "import PyInstaller; import sys; print('PyInstaller OK, python:', sys.version)"
-
-          python -m pip freeze
+          pip install -r requirements.txt
+          pip install pyinstaller
 
       - name: Validate required files
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-
-          if (-not (Test-Path "main.py")) { throw "main.py not found at repo root" }
-          if (-not (Test-Path "hooks/runtime_qt_path.py")) { throw "hooks/runtime_qt_path.py not found" }
-          if (-not (Test-Path "scripts/copy_qt_runtime.py")) { throw "scripts/copy_qt_runtime.py not found" }
-
-          # Optional but recommended (template)
+          if (-not (Test-Path "main.py")) { throw "main.py not found" }
           if (-not (Test-Path "Templates/bon de commande V1.pdf")) {
-            Write-Host "WARNING: Templates/bon de commande V1.pdf not found (build can still succeed but app may fail at runtime)."
+            Write-Host "WARNING: Template not found, build will succeed but app may fail at runtime"
           }
 
-      - name: Diagnose PySide6 Qt runtime on runner
+      - name: Build CLI executable
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          python -c "import PySide6, pathlib; p=pathlib.Path(PySide6.__file__).resolve().parent; qt=p/'Qt'/'bin'; print('PySide6 at:', p); print('Qt bin:', qt); print('Qt bin exists:', qt.exists()); print('Qt6Core sample:', [x.name for x in list(qt.glob('Qt6Core*.dll'))[:5]]); print('Qt6 dll sample:', [x.name for x in list(qt.glob('Qt6*.dll'))[:10]])"
-
-      - name: List scripts directory
-        shell: pwsh
-        run: |
-          dir scripts
-
-      - name: Diagnose Qt (pre-build)
-        shell: pwsh
-        run: |
-          python scripts/diagnose_qt.py
-
-      - name: Build with PyInstaller (onedir)
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          python -m PyInstaller --noconfirm --clean --onedir --windowed --name "BDC Generator" `
+          python -m PyInstaller --noconfirm --clean --onefile --console --name "bdc-generator" `
             --add-data "Templates;Templates" `
-            --collect-all PySide6 `
-            --collect-all shiboken6 `
-            --collect-all PyMuPDF `
-            --collect-binaries PySide6 `
-            --collect-binaries shiboken6 `
-            --collect-binaries PyMuPDF `
-            --runtime-hook "hooks/runtime_qt_path.py" `
-            --hidden-import "PySide6.QtCore" `
-            --hidden-import "PySide6.QtGui" `
-            --hidden-import "PySide6.QtWidgets" `
-            --hidden-import "fitz" `
             main.py
 
-      - name: Debug - List dist contents before Qt copy
+      - name: Verify executable
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Continue"
+          $exePath = Join-Path $PWD "dist/bdc-generator.exe"
+          if (-not (Test-Path $exePath)) { throw "Executable not found: $exePath" }
+          & $exePath --version
 
-          $distDir = Join-Path $PWD "dist\BDC Generator"
-          Write-Host "=== distDir: $distDir ==="
-
-          if (Test-Path $distDir) {
-            Write-Host "=== Looking for Qt DLLs before copy ==="
-            $qtDlls = Get-ChildItem -Path $distDir -Recurse -Filter "Qt6*.dll" -ErrorAction SilentlyContinue
-            if ($qtDlls) {
-              $qtDlls | Select-Object -First 30 | ForEach-Object { Write-Host "Found: $($_.FullName)" }
-            } else {
-              Write-Host "No Qt6 DLLs found yet (expected sometimes before manual copy)"
-            }
-          } else {
-            Write-Host "dist folder not found yet."
-          }
-
-      - name: Force copy Qt runtime into dist
+      - name: Create release package
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          python scripts/copy_qt_runtime.py "dist/BDC Generator"
-
-      - name: Verify required DLLs are present (post-copy)
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          $distDir = Join-Path $PWD "dist\BDC Generator"
-          if (-not (Test-Path $distDir)) { throw "dist folder not found: $distDir" }
-
-          Write-Host "=== Verifying required DLLs (recursive) ==="
-
-          $qtCore = Get-ChildItem -Path $distDir -Recurse -Filter "Qt6Core*.dll" -ErrorAction SilentlyContinue
-          if (-not $qtCore) {
-            Write-Host "Tree dist (top 200):"
-            Get-ChildItem -Path $distDir -Recurse | Select-Object -First 200 FullName
-            throw "Missing Qt6Core*.dll in $distDir"
-          }
-          Write-Host "Found Qt6Core: $($qtCore[0].FullName)"
-
-          $shiboken = Get-ChildItem -Path $distDir -Recurse -Filter "shiboken6*.dll" -ErrorAction SilentlyContinue
-          if (-not $shiboken) { throw "Missing shiboken6*.dll in $distDir" }
-          Write-Host "Found shiboken6 DLLs: $($shiboken.Count)"
-
-      - name: Create portable ZIP
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-
           $version = "1.0.0"
-          $zipName = "BDC_Generator_v${version}_Windows.zip"
-          $distDir = Join-Path $PWD "dist\BDC Generator"
-
-          if (-not (Test-Path $distDir)) { throw "dist folder not found: $distDir" }
-
+          $zipName = "BDC_Generator_CLI_v${version}_Windows.zip"
+          $releaseDir = Join-Path $PWD "release"
+          
+          if (Test-Path $releaseDir) { Remove-Item -Recurse -Force $releaseDir }
+          New-Item -ItemType Directory -Path $releaseDir | Out-Null
+          
+          Copy-Item -Path "dist/bdc-generator.exe" -Destination $releaseDir
+          Copy-Item -Path "Templates" -Destination "$releaseDir/Templates" -Recurse
+          Copy-Item -Path "README.md" -Destination $releaseDir
+          Copy-Item -Path "requirements.txt" -Destination $releaseDir
+          
           if (Test-Path $zipName) { Remove-Item $zipName -Force }
-          Compress-Archive -Path "$distDir\*" -DestinationPath $zipName -Force
-
+          Compress-Archive -Path "$releaseDir/*" -DestinationPath $zipName -Force
+          
           Write-Host "Created: $zipName"
           $size = (Get-Item $zipName).Length / 1MB
           Write-Host "Size: $([math]::Round($size, 2)) MB"
 
-      - name: Upload artifact (ZIP)
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: BDC-Generator-Windows
-          path: BDC_Generator_v*_Windows.zip
+          name: BDC-Generator-CLI-Windows
+          path: BDC_Generator_CLI_v*_Windows.zip
           retention-days: 30
-
-      # Optionnel mais ultra utile pour debug si ça plante encore :
-      - name: Upload dist for debugging (always)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug_dist
-          path: dist/**
-          retention-days: 7

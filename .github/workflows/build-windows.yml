@@ -1,4 +1,4 @@
-name: Build Windows Portable
+name: Build CLI Executable
 
 on:
   workflow_dispatch:
@@ -30,71 +30,25 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
-          python -m pip install PySide6==6.6.3 PySide6_Essentials==6.6.3 PySide6_Addons==6.6.3 shiboken6==6.6.3 pyinstaller
+          python -m pip install pyinstaller
 
-      - name: Build portable app
+      - name: Test CLI application
         run: |
-          python -m PyInstaller --noconfirm --clean --onedir --windowed --name "BDC Generator" ^
+          python main.py --version
+          python -m unittest discover tests -q
+
+      - name: Build CLI executable
+        run: |
+          python -m PyInstaller --noconfirm --clean --onefile --console --name "bdc-generator" ^
             --add-data "Templates;Templates" ^
-            --collect-all PySide6 ^
-            --collect-all shiboken6 ^
-            --collect-all PyMuPDF ^
-            --collect-binaries PySide6 ^
-            --collect-binaries shiboken6 ^
-            --collect-binaries PyMuPDF ^
-            --runtime-hook hooks\runtime_qt_path.py ^
-            --hidden-import=winrt ^
-            --hidden-import=winrt.windows.media.ocr ^
-            --hidden-import=winrt.windows.graphics.imaging ^
-            --hidden-import=winrt.windows.storage.streams ^
-            --hidden-import=fitz ^
             main.py
 
-      - name: Debug PySide6 Qt paths
-        run: |
-          python -c "import pathlib; from PySide6.QtCore import QLibraryInfo; import PySide6; p=pathlib.Path(PySide6.__file__).resolve().parent; print('PySide6 at', p); print('Qt bin candidate', p/'Qt'/'bin'); print('Qt bin QLibraryInfo', QLibraryInfo.path(QLibraryInfo.LibraryPath.BinariesPath) if hasattr(QLibraryInfo, 'path') else QLibraryInfo.location(QLibraryInfo.LibraryPath.BinariesPath)); print('Qt plugins QLibraryInfo', QLibraryInfo.path(QLibraryInfo.LibraryPath.PluginsPath) if hasattr(QLibraryInfo, 'path') else QLibraryInfo.location(QLibraryInfo.LibraryPath.PluginsPath));"
-
-      - name: Diagnose Qt runtime (ASCII)
-        run: |
-          python scripts/diagnose_qt.py
-
-      - name: Copy Qt runtime
-        run: |
-          python scripts/copy_qt_runtime.py "dist/BDC Generator"
-
-      - name: Verify Qt and Shiboken DLLs are packaged
+      - name: Verify executable
         shell: pwsh
         run: |
-          $distDir = Join-Path $PWD "dist/BDC Generator"
-          if (-not (Test-Path $distDir)) { throw "dist folder not found: $distDir" }
-          $qtCore = Get-ChildItem -Path $distDir -Recurse -Filter "Qt6Core.dll" -ErrorAction SilentlyContinue
-          if (-not $qtCore) { throw "Missing required DLL: Qt6Core.dll" }
-          $qtCore | ForEach-Object { Write-Host "Found Qt6Core DLL at $($_.FullName)" }
-          $qtGui = Get-ChildItem -Path $distDir -Recurse -Filter "Qt6Gui.dll" -ErrorAction SilentlyContinue
-          if (-not $qtGui) { throw "Missing required DLL: Qt6Gui.dll" }
-          $qtGui | ForEach-Object { Write-Host "Found Qt6Gui DLL at $($_.FullName)" }
-          $qtWidgets = Get-ChildItem -Path $distDir -Recurse -Filter "Qt6Widgets.dll" -ErrorAction SilentlyContinue
-          if (-not $qtWidgets) { throw "Missing required DLL: Qt6Widgets.dll" }
-          $qtWidgets | ForEach-Object { Write-Host "Found Qt6Widgets DLL at $($_.FullName)" }
-          $qt = Get-ChildItem -Path $distDir -Recurse -Filter "Qt6*.dll" -ErrorAction SilentlyContinue
-          if (-not $qt) { throw "Missing required DLLs matching: Qt6*.dll" }
-          $qt | ForEach-Object { Write-Host "Found Qt6 DLL at $($_.FullName)" }
-          $shiboken = Get-ChildItem -Path $distDir -Recurse -Filter "shiboken6*.dll" -ErrorAction SilentlyContinue
-          if (-not $shiboken) { throw "Missing required DLLs matching: shiboken6*.dll" }
-          $shiboken | ForEach-Object { Write-Host "Found shiboken6 DLL at $($_.FullName)" }
-
-      - name: Smoke test executable
-        shell: pwsh
-        run: |
-          $exePath = Join-Path $PWD "dist/BDC Generator/BDC Generator.exe"
+          $exePath = Join-Path $PWD "dist/bdc-generator.exe"
           if (-not (Test-Path $exePath)) { throw "Executable not found: $exePath" }
-          $process = Start-Process -FilePath $exePath -PassThru
-          Start-Sleep -Seconds 5
-          if (-not $process.HasExited) {
-            Stop-Process -Id $process.Id -Force
-            exit 0
-          }
-          exit $process.ExitCode
+          & $exePath --version
 
       - name: Create release zip
         shell: pwsh
@@ -102,12 +56,14 @@ jobs:
           $releaseDir = Join-Path $PWD "release_zip"
           if (Test-Path $releaseDir) { Remove-Item -Recurse -Force $releaseDir }
           New-Item -ItemType Directory -Path $releaseDir | Out-Null
-          Copy-Item -Recurse -Path "dist/BDC Generator" -Destination $releaseDir
-          Copy-Item -Path "README_Installation.txt","README_PACKAGING.md" -Destination $releaseDir
-          Compress-Archive -Path "$releaseDir/*" -DestinationPath "BDC_Generator.zip"
+          Copy-Item -Path "dist/bdc-generator.exe" -Destination $releaseDir
+          Copy-Item -Path "Templates" -Destination $releaseDir -Recurse
+          Copy-Item -Path "README.md" -Destination $releaseDir
+          Copy-Item -Path "requirements.txt" -Destination $releaseDir
+          Compress-Archive -Path "$releaseDir/*" -DestinationPath "BDC_Generator_CLI.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: BDC_Generator
-          path: BDC_Generator.zip
+          name: BDC_Generator_CLI
+          path: BDC_Generator_CLI.zip

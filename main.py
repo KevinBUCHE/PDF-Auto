@@ -1,443 +1,311 @@
-import os
+#!/usr/bin/env python3
+"""
+BDC Generator - CLI Application
+
+Simple CLI tool to generate purchase orders (BDC) from SRX quote PDFs.
+
+Usage:
+    python main.py <devis.pdf> [<devis2.pdf> ...]
+    python main.py --batch <directory>
+
+Objective:
+    Take a SRX PDF quote from RIAUX and generate a purchase order PDF
+    by filling the AcroForm template: Templates/bon de commande V1.pdf
+
+Key Features:
+    - Robust extraction: CLIENT / COMMERCIAL / RÉF AFFAIRE / MONTANTS
+    - RIAUX contamination prevention: never inject RIAUX address/details into client fields
+    - Simple CLI interface, no GUI
+    - Minimal dependencies
+"""
+
+import argparse
 import re
-import shutil
 import sys
 import traceback
-from dataclasses import dataclass
 from pathlib import Path
-
-from PySide6 import QtCore, QtGui, QtWidgets
+from datetime import datetime
 
 from services.devis_parser import DevisParser
 from services.bdc_filler import BdcFiller
-from utils.logging_util import append_log
-from utils.paths import (
-    get_log_file_path,
-    get_template_path,
-    get_user_templates_dir,
-)
+from services.sanitize import validate_client_extraction
+
 
 APP_NAME = "BDC Generator"
+VERSION = "1.0.0"
 
 
-@dataclass
-class DevisItem:
-    path: Path
-    data: dict
-    pose_sold: bool
-    pose_source: str
-    auto_pose_sold: bool
-    auto_pose_status: str
-
-
-class DropTable(QtWidgets.QTableWidget):
-    files_dropped = QtCore.Signal(list)
-
-    def __init__(self, parent=None):
-        super().__init__(0, 5, parent)
-        self.setAcceptDrops(True)
-        self.setHorizontalHeaderLabels(
-            ["Fichier devis", "Pose vendue", "Forcer", "Auto pose", "Statut"]
+class BdcGeneratorCLI:
+    """CLI interface for BDC Generator"""
+    
+    def __init__(self, verbose: bool = False):
+        self.verbose = verbose
+        self.parser = DevisParser(debug=verbose)
+        self.bdc_filler = BdcFiller(logger=self.log if verbose else None)
+        self.template_path = self._find_template()
+        
+    def log(self, message: str):
+        """Log a message to stdout"""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        print(f"[{timestamp}] {message}")
+    
+    def error(self, message: str):
+        """Log an error message to stderr"""
+        print(f"ERROR: {message}", file=sys.stderr)
+    
+    def _find_template(self) -> Path:
+        """Find the BDC template PDF"""
+        # Try multiple locations
+        locations = [
+            Path(__file__).parent / "Templates" / "bon de commande V1.pdf",
+            Path.home() / ".config" / APP_NAME / "Templates" / "bon de commande V1.pdf",
+            Path(__file__).parent / "Sample" / "bon de commande V1.pdf",
+        ]
+        
+        for location in locations:
+            if location.exists():
+                return location
+        
+        raise FileNotFoundError(
+            "Template PDF not found. Please place 'bon de commande V1.pdf' "
+            "in the Templates/ directory."
         )
-        header = self.horizontalHeader()
-        header.setStretchLastSection(True)
-        header.setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
-        header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(4, QtWidgets.QHeaderView.Stretch)
-
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-        else:
-            super().dragEnterEvent(event)
-
-    def dragMoveEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-        else:
-            super().dragMoveEvent(event)
-
-    def dropEvent(self, event):
-        if event.mimeData().hasUrls():
-            paths = []
-            for url in event.mimeData().urls():
-                path = Path(url.toLocalFile())
-                if path.suffix.lower() == ".pdf":
-                    paths.append(path)
-            if paths:
-                self.files_dropped.emit(paths)
-            event.acceptProposedAction()
-        else:
-            super().dropEvent(event)
-
-
-class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle(APP_NAME)
-        self.resize(900, 600)
-
-        self.devis_items = {}
-        self.parser = DevisParser(debug=bool(os.getenv("BDC_DEBUG")))
-        self.bdc_filler = BdcFiller(logger=self.log)
-        self.base_dir = self._resolve_base_dir()
-        self.templates_dir = get_user_templates_dir(APP_NAME)
-        self.template_path = get_template_path(APP_NAME)
-        self.bundled_template_path = self.base_dir / "Templates" / "bon de commande V1.pdf"
-        self.log_file_path = get_log_file_path(APP_NAME)
-        self._loading_table = False
-
-        central = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(central)
-
-        template_layout = QtWidgets.QHBoxLayout()
-        self.template_status = QtWidgets.QLabel()
-        self.open_templates_button = QtWidgets.QPushButton("Ouvrir le dossier Templates")
-        self.choose_template_button = QtWidgets.QPushButton("Choisir un template…")
-        self.open_log_button = QtWidgets.QPushButton("Ouvrir le log")
-        self.open_templates_button.clicked.connect(self.open_templates_folder)
-        self.choose_template_button.clicked.connect(self.choose_template_file)
-        self.open_log_button.clicked.connect(self.open_log_file)
-        template_layout.addWidget(self.template_status)
-        template_layout.addStretch()
-        template_layout.addWidget(self.open_templates_button)
-        template_layout.addWidget(self.choose_template_button)
-        template_layout.addWidget(self.open_log_button)
-        layout.addLayout(template_layout)
-
-        info_label = QtWidgets.QLabel(
-            "Glissez-déposez vos devis PDF SRX*. La pose est détectée automatiquement "
-            "(colonne Auto pose). Cochez “Forcer” pour ajuster la pose."
-        )
-        info_label.setWordWrap(True)
-        layout.addWidget(info_label)
-
-        self.table = DropTable()
-        self.table.files_dropped.connect(self.handle_files_dropped)
-        self.table.itemChanged.connect(self.handle_item_changed)
-        layout.addWidget(self.table)
-
-        buttons_layout = QtWidgets.QHBoxLayout()
-        self.generate_button = QtWidgets.QPushButton("Générer les BDC")
-        self.clear_button = QtWidgets.QPushButton("Vider la liste")
-        self.export_debug_button = QtWidgets.QPushButton("Exporter debug")
-        self.generate_button.clicked.connect(self.generate_bdcs)
-        self.clear_button.clicked.connect(self.clear_list)
-        self.export_debug_button.clicked.connect(self.export_debug)
-        buttons_layout.addWidget(self.generate_button)
-        buttons_layout.addWidget(self.clear_button)
-        buttons_layout.addWidget(self.export_debug_button)
-        layout.addLayout(buttons_layout)
-
-        self.logs = QtWidgets.QTextEdit()
-        self.logs.setReadOnly(True)
-        layout.addWidget(self.logs)
-
-        self.setCentralWidget(central)
-        self.refresh_template_status(log_missing=True)
-
-    def log(self, message):
-        self.logs.append(message)
-        append_log(self.log_file_path, message)
-
-    def log_to_file(self, message):
-        append_log(self.log_file_path, message)
-
-    def _resolve_base_dir(self) -> Path:
-        if getattr(sys, "frozen", False):
-            return Path(sys.executable).parent
-        return Path(__file__).resolve().parent
-
-    def _template_status_text(self, exists: bool) -> str:
-        if exists:
-            return "Template: OK"
-        return "Template: MANQUANT (utilisez 'Choisir un template…')"
-
-    def refresh_template_status(self, log_missing: bool = False):
-        self.templates_dir.mkdir(parents=True, exist_ok=True)
-        if not self.template_path.exists() and self.bundled_template_path.exists():
-            try:
-                shutil.copy2(self.bundled_template_path, self.template_path)
-                self.log(f"Template copié depuis l'application: {self.template_path}")
-            except Exception as exc:  # pylint: disable=broad-except
-                self.log(f"Erreur copie template embarqué: {exc}")
-        exists = self.template_path.exists()
-        self.template_status.setText(self._template_status_text(exists))
-        color = "#1b8f1b" if exists else "#b00020"
-        self.template_status.setStyleSheet(f"font-weight: 600; color: {color};")
-        self.generate_button.setEnabled(exists)
-        if not exists and log_missing:
-            self.log(
-                "Template manquant: placez 'bon de commande V1.pdf' dans le dossier Templates utilisateur "
-                "ou utilisez 'Choisir un template…'."
-            )
-
-    def open_templates_folder(self):
-        self.templates_dir.mkdir(parents=True, exist_ok=True)
-        opened = QtGui.QDesktopServices.openUrl(
-            QtCore.QUrl.fromLocalFile(str(self.templates_dir))
-        )
-        if not opened:
-            self.log("Impossible d'ouvrir le dossier Templates.")
-
-    def open_log_file(self):
-        self.log_file_path.parent.mkdir(parents=True, exist_ok=True)
-        if not self.log_file_path.exists():
-            self.log_file_path.touch()
-        opened = QtGui.QDesktopServices.openUrl(
-            QtCore.QUrl.fromLocalFile(str(self.log_file_path))
-        )
-        if not opened:
-            self.log("Impossible d'ouvrir le fichier log.")
-
-    def export_debug(self):
-        row = self.table.currentRow()
-        if row < 0:
-            self.log("Sélectionnez un devis pour exporter le debug.")
-            return
-        file_item = self.table.item(row, 0)
-        if not file_item:
-            self.log("Impossible de trouver le devis sélectionné.")
-            return
-        path = Path(file_item.text())
-        exported_path = self.parser.export_debug(path)
-        if not exported_path:
-            self.log(f"Aucune donnée debug disponible pour {path.name}.")
-            return
-        self.log(f"Debug exporté: {exported_path}")
-
-    def choose_template_file(self):
-        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self,
-            "Choisir un template",
-            str(self.templates_dir),
-            "PDF (*.pdf)",
-        )
-        if not file_path:
-            return
-        self.install_template(Path(file_path))
-
-    def _is_template_file(self, path: Path) -> bool:
-        normalized = re.sub(r"[\s_-]+", "", path.name.lower())
-        return normalized == "bondecommandev1.pdf"
-
-    def _is_srx_pdf(self, path: Path) -> bool:
-        return path.suffix.lower() == ".pdf" and path.name.upper().startswith("SRX")
-
-    def handle_files_dropped(self, paths):
-        for path in paths:
-            if self._is_template_file(path):
-                self.install_template(path)
-                continue
-            if not self._is_srx_pdf(path):
-                self.log(f"Fichier ignoré (attendu SRX*.pdf): {path.name}")
-                continue
-            if path in self.devis_items:
-                self.log(f"Déjà ajouté: {path}")
-                continue
-            try:
-                data = self.parser.parse(path)
-                if data.get("parse_warning"):
-                    self.log(f"{path.name}: {data['parse_warning']}")
-                pose_sold = bool(data.get("pose_sold"))
-                self.add_row(path, pose_sold, "auto")
-                self.devis_items[path] = DevisItem(
-                    path=path,
-                    data=data,
-                    pose_sold=pose_sold,
-                    pose_source="auto",
-                    auto_pose_sold=pose_sold,
-                    auto_pose_status="auto",
-                )
-                self.log(f"Ajouté: {path.name} (pose: {'oui' if pose_sold else 'non'})")
-                if "SRX2511AFF037501" in path.name:
-                    self.log(
-                        "[TEST] SRX2511AFF037501 client_nom="
-                        f"{data.get('client_nom')!r} (attendu 'BERVAL MAISONS')"
-                    )
-                    self.log(
-                        "[TEST] SRX2511AFF037501 ref_affaire="
-                        f"{data.get('ref_affaire')!r}"
-                    )
-                    self.log(
-                        "[TEST] SRX2511AFF037501 fourniture_ht="
-                        f"{data.get('fourniture_ht')!r} (attendu '4 894,08')"
-                    )
-                    self.log(
-                        "[TEST] SRX2511AFF037501 prestations_ht="
-                        f"{data.get('prestations_ht')!r} (attendu '1 159,12')"
-                    )
-                for entry in data.get("debug", []):
-                    self.log(f"[debug] {path.name}: {entry}")
-            except Exception as exc:  # pylint: disable=broad-except
-                self.log(f"Erreur lecture {path.name}: {exc}")
-
-    def install_template(self, source: Path):
-        self.templates_dir.mkdir(parents=True, exist_ok=True)
+    
+    def process_devis(self, devis_path: Path, output_dir: Path) -> bool:
+        """
+        Process a single devis PDF and generate BDC.
+        
+        Args:
+            devis_path: Path to the devis PDF
+            output_dir: Output directory for generated BDC
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if not devis_path.exists():
+            self.error(f"File not found: {devis_path}")
+            return False
+        
+        if not devis_path.suffix.lower() == ".pdf":
+            self.error(f"Not a PDF file: {devis_path}")
+            return False
+        
+        # Check if it's a SRX file
+        if not devis_path.name.upper().startswith("SRX"):
+            self.error(f"Not a SRX file (filename should start with SRX): {devis_path.name}")
+            return False
+        
         try:
-            shutil.copy2(source, self.template_path)
-            self.log(f"Template copié: {self.template_path}")
-            self.refresh_template_status()
-        except Exception as exc:  # pylint: disable=broad-except
-            self.log(f"Erreur copie template: {exc}")
-
-    def add_row(self, path, pose_sold, pose_status):
-        row = self.table.rowCount()
-        self._loading_table = True
-        self.table.insertRow(row)
-        file_item = QtWidgets.QTableWidgetItem(str(path))
-        file_item.setFlags(file_item.flags() ^ QtCore.Qt.ItemIsEditable)
-        self.table.setItem(row, 0, file_item)
-
-        pose_item = QtWidgets.QTableWidgetItem()
-        pose_item.setFlags(QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemIsEnabled)
-        pose_item.setCheckState(QtCore.Qt.Checked if pose_sold else QtCore.Qt.Unchecked)
-        self.table.setItem(row, 1, pose_item)
-
-        force_item = QtWidgets.QTableWidgetItem()
-        force_item.setFlags(QtCore.Qt.ItemIsUserCheckable | QtCore.Qt.ItemIsEnabled)
-        force_item.setCheckState(QtCore.Qt.Unchecked)
-        self.table.setItem(row, 2, force_item)
-
-        self._set_pose_editable(row, False)
-
-        origin_item = QtWidgets.QTableWidgetItem(
-            "Auto" if pose_status == "auto" else "À vérifier"
-        )
-        origin_item.setFlags(origin_item.flags() ^ QtCore.Qt.ItemIsEditable)
-        origin_item.setToolTip(origin_item.text())
-        self.table.setItem(row, 3, origin_item)
-
-        status_item = QtWidgets.QTableWidgetItem("En attente")
-        status_item.setFlags(status_item.flags() ^ QtCore.Qt.ItemIsEditable)
-        self.table.setItem(row, 4, status_item)
-        self._loading_table = False
-
-    def _set_pose_editable(self, row: int, enabled: bool):
-        pose_item = self.table.item(row, 1)
-        if not pose_item:
-            return
-        flags = pose_item.flags()
-        if enabled:
-            pose_item.setFlags(flags | QtCore.Qt.ItemIsEnabled)
-        else:
-            pose_item.setFlags(flags & ~QtCore.Qt.ItemIsEnabled)
-
-    def handle_item_changed(self, item):
-        if self._loading_table:
-            return
-        if item.column() not in (1, 2):
-            return
-        file_item = self.table.item(item.row(), 0)
-        origin_item = self.table.item(item.row(), 3)
-        force_item = self.table.item(item.row(), 2)
-        if not file_item or not origin_item:
-            return
-        path = Path(file_item.text())
-        devis_item = self.devis_items.get(path)
-        if not devis_item:
-            return
-        if item.column() == 2:
-            forced = item.checkState() == QtCore.Qt.Checked
-            self._set_pose_editable(item.row(), forced)
-            if forced:
-                origin_item.setText("Forcé")
-                origin_item.setToolTip("Forcé")
-            else:
-                pose_item = self.table.item(item.row(), 1)
-                if pose_item:
-                    pose_item.setCheckState(
-                        QtCore.Qt.Checked
-                        if devis_item.auto_pose_sold
-                        else QtCore.Qt.Unchecked
-                    )
-                devis_item.pose_sold = devis_item.auto_pose_sold
-                devis_item.pose_source = "auto"
-                devis_item.data["pose_sold"] = devis_item.auto_pose_sold
-                origin_text = (
-                    "Auto"
-                    if devis_item.auto_pose_status == "auto"
-                    else "À vérifier"
-                )
-                origin_item.setText(origin_text)
-                origin_item.setToolTip(origin_text)
-            return
-        if force_item and force_item.checkState() != QtCore.Qt.Checked:
-            return
-        pose_sold = item.checkState() == QtCore.Qt.Checked
-        devis_item.pose_sold = pose_sold
-        devis_item.pose_source = "forced"
-        devis_item.data["pose_sold"] = pose_sold
-        origin_item.setText("Forcé")
-        origin_item.setToolTip("Forcé")
-
-    def clear_list(self):
-        self.table.setRowCount(0)
-        self.devis_items = {}
-        self.log("Liste vidée.")
-
-    def generate_bdcs(self):
-        if not self.template_path.exists():
-            self.refresh_template_status(log_missing=True)
-            return
-        output_dir = Path.home() / "Desktop" / "BDC_Output"
-        output_dir.mkdir(exist_ok=True)
-
-        for row in range(self.table.rowCount()):
-            file_item = self.table.item(row, 0)
-            pose_item = self.table.item(row, 1)
-            status_item = self.table.item(row, 4)
-            if not file_item:
-                continue
-            path = Path(file_item.text())
-            item = self.devis_items.get(path)
-            if not item:
-                continue
-            pose_sold = pose_item.checkState() == QtCore.Qt.Checked
-            item.pose_sold = pose_sold
-            item.data["pose_sold"] = pose_sold
-            try:
-                output_name = self._build_output_name(item.data)
-                output_path = output_dir / output_name
-                self.bdc_filler.fill(self.template_path, item.data, output_path)
-                status_item.setText("OK")
-                self.log(f"BDC généré: {output_path}")
-            except Exception as exc:  # pylint: disable=broad-except
-                short_message = str(exc).strip() or exc.__class__.__name__
-                status_item.setText(f"Erreur: {short_message}")
-                self.log(
-                    f"Erreur génération {path.name}: {exc.__class__.__name__}: {short_message}"
-                )
-                self.log_to_file(traceback.format_exc())
-
+            if self.verbose:
+                self.log(f"Parsing: {devis_path.name}")
+            
+            # Parse devis
+            data = self.parser.parse(devis_path)
+            
+            # Check for parse warnings
+            if data.get("parse_warning"):
+                self.error(f"Parse warnings: {data['parse_warning']}")
+            
+            # Validate no RIAUX contamination
+            contamination_warnings = validate_client_extraction(data)
+            if contamination_warnings:
+                self.error("RIAUX contamination detected!")
+                for warning in contamination_warnings:
+                    self.error(f"  - {warning}")
+                return False
+            
+            # Check required fields
+            required_fields = ["client_nom", "devis_num", "ref_affaire"]
+            missing = [f for f in required_fields if not data.get(f)]
+            if missing:
+                self.error(f"Missing required fields: {', '.join(missing)}")
+                return False
+            
+            # Generate output filename
+            output_name = self._build_output_name(data)
+            output_path = output_dir / output_name
+            
+            if self.verbose:
+                self.log(f"Generating BDC: {output_name}")
+                self.log(f"  Client: {data.get('client_nom')}")
+                self.log(f"  Ref affaire: {data.get('ref_affaire')}")
+                self.log(f"  Devis: SRX{data.get('devis_annee_mois')}{data.get('devis_type')}{data.get('devis_num')}")
+                self.log(f"  Fourniture HT: {data.get('fourniture_ht')}")
+                self.log(f"  Prestations HT: {data.get('prestations_ht')}")
+                self.log(f"  Pose: {'Oui' if data.get('pose_sold') else 'Non'}")
+            
+            # Fill BDC
+            self.bdc_filler.fill(self.template_path, data, output_path)
+            
+            print(f"✓ Generated: {output_path}")
+            return True
+            
+        except Exception as exc:
+            self.error(f"Failed to process {devis_path.name}: {exc}")
+            if self.verbose:
+                traceback.print_exc()
+            return False
+    
     def _build_output_name(self, data: dict) -> str:
+        """Build output filename from devis data"""
         client_nom = data.get("client_nom", "").strip() or "CLIENT"
-        ref_affaire = self._clean_ref_affaire(data.get("ref_affaire", ""))
-        ref_affaire = ref_affaire.strip() or "Ref INCONNUE"
+        ref_affaire = data.get("ref_affaire", "").strip() or "REF"
+        
+        # Clean ref_affaire
+        ref_affaire = re.sub(r"^réf\s+affaire\s*:?\s*", "", ref_affaire, flags=re.IGNORECASE)
+        
         base = f"CDE {client_nom} Ref {ref_affaire}"
+        
+        # Remove invalid filename characters
         base = re.sub(r'[\\/:*?"<>|]', " ", base)
         base = re.sub(r"\s+", " ", base).strip()
+        
+        # Limit length
         max_base = 150 - len(".pdf")
         if len(base) > max_base:
             base = base[:max_base].rstrip()
+        
         return f"{base}.pdf"
-
-    def _clean_ref_affaire(self, value: str) -> str:
-        cleaned = (value or "").strip()
-        cleaned = re.sub(r"^réf\s+affaire\s*:?\s*", "", cleaned, flags=re.IGNORECASE)
-        return cleaned
+    
+    def process_batch(self, input_dir: Path, output_dir: Path) -> tuple[int, int]:
+        """
+        Process all SRX PDFs in a directory.
+        
+        Args:
+            input_dir: Directory containing devis PDFs
+            output_dir: Output directory for generated BDCs
+            
+        Returns:
+            Tuple of (successful_count, failed_count)
+        """
+        if not input_dir.exists():
+            self.error(f"Directory not found: {input_dir}")
+            return 0, 0
+        
+        if not input_dir.is_dir():
+            self.error(f"Not a directory: {input_dir}")
+            return 0, 0
+        
+        # Find all SRX PDF files
+        pdf_files = sorted(input_dir.glob("SRX*.pdf"))
+        
+        if not pdf_files:
+            self.error(f"No SRX*.pdf files found in {input_dir}")
+            return 0, 0
+        
+        print(f"Found {len(pdf_files)} SRX PDF file(s)")
+        
+        successful = 0
+        failed = 0
+        
+        for pdf_path in pdf_files:
+            if self.process_devis(pdf_path, output_dir):
+                successful += 1
+            else:
+                failed += 1
+        
+        return successful, failed
 
 
 def main():
-    os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
-    app = QtWidgets.QApplication(sys.argv)
-    app.setApplicationName(APP_NAME)
-    window = MainWindow()
-    window.show()
-    sys.exit(app.exec())
+    """Main entry point"""
+    parser = argparse.ArgumentParser(
+        description=f"{APP_NAME} - Generate purchase orders from SRX quotes",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python main.py SRX2511AFF037501.pdf
+  python main.py SRX*.pdf
+  python main.py --batch ./devis_folder
+  python main.py --output ./output SRX2511AFF037501.pdf
+        """
+    )
+    
+    parser.add_argument(
+        "inputs",
+        nargs="*",
+        type=Path,
+        help="Input devis PDF file(s) (SRX*.pdf)"
+    )
+    
+    parser.add_argument(
+        "-b", "--batch",
+        type=Path,
+        metavar="DIR",
+        help="Process all SRX PDFs in directory"
+    )
+    
+    parser.add_argument(
+        "-o", "--output",
+        type=Path,
+        metavar="DIR",
+        help="Output directory (default: ./BDC_Output)"
+    )
+    
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="Verbose output"
+    )
+    
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"{APP_NAME} {VERSION}"
+    )
+    
+    args = parser.parse_args()
+    
+    # Validate arguments
+    if not args.inputs and not args.batch:
+        parser.error("Please provide input file(s) or use --batch")
+    
+    # Set output directory
+    output_dir = args.output or Path("./BDC_Output")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Create CLI instance
+    cli = BdcGeneratorCLI(verbose=args.verbose)
+    
+    if args.verbose:
+        cli.log(f"{APP_NAME} v{VERSION}")
+        cli.log(f"Template: {cli.template_path}")
+        cli.log(f"Output directory: {output_dir.resolve()}")
+    
+    # Process files
+    successful = 0
+    failed = 0
+    
+    try:
+        if args.batch:
+            # Batch mode
+            succ, fail = cli.process_batch(args.batch, output_dir)
+            successful += succ
+            failed += fail
+        else:
+            # Individual files
+            for input_path in args.inputs:
+                if cli.process_devis(input_path, output_dir):
+                    successful += 1
+                else:
+                    failed += 1
+        
+        # Summary
+        print(f"\nSummary: {successful} successful, {failed} failed")
+        
+        if failed > 0:
+            return 1
+        return 0
+        
+    except KeyboardInterrupt:
+        cli.error("\nInterrupted by user")
+        return 130
+    except Exception as exc:
+        cli.error(f"Unexpected error: {exc}")
+        if args.verbose:
+            traceback.print_exc()
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
