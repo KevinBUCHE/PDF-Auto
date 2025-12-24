@@ -11,6 +11,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from services.devis_parser import DevisParser
 from services.bdc_filler import BdcFiller
 from services.address_sanitizer import sanitize_client_address
+from services.data_normalizer import normalize_extracted_data
 from services.gemini_extractor import DEFAULT_GEMINI_MODEL, GeminiExtractor
 from utils.logging_util import append_log
 from utils.paths import (
@@ -282,7 +283,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 pose_status = "gemini"
             except Exception as exc:  # pylint: disable=broad-except
                 self.log(f"Gemini ignoré pour {path.name}: {exc}")
-        data = sanitize_client_address(data)
+        data = normalize_extracted_data(data)
         if data.get("parse_warning"):
             self.log(f"{path.name}: {data['parse_warning']}")
         return data, pose_status
@@ -461,7 +462,7 @@ class MainWindow(QtWidgets.QMainWindow):
             try:
                 output_name = self._build_output_name(item.data)
                 output_path = output_dir / output_name
-                cleaned_data = sanitize_client_address(item.data)
+                cleaned_data = normalize_extracted_data(item.data)
                 self.bdc_filler.fill(self.template_path, cleaned_data, output_path)
                 status_item.setText("OK")
                 self.log(f"BDC généré: {output_path}")

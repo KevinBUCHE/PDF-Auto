@@ -29,13 +29,13 @@ class DevisParser:
         commercial_details = self._find_commercial_details(lines)
 
         fourniture_ht = self._find_amount_by_label(
-            lines, r"PRIX DE LA FOURNITURE HT\s*:\s*([\d\s]+,\d{2})"
+            lines, r"PRIX DE LA FOURNITURE HT\s*:\s*([\d\s]+[\.,]\d{2})"
         )
         prestations_ht = self._find_amount_by_label(
-            lines, r"PRIX PRESTATIONS ET SERVICES HT\s*:\s*([\d\s]+,\d{2})"
+            lines, r"PRIX PRESTATIONS ET SERVICES HT\s*:\s*([\d\s]+[\.,]\d{2})"
         )
         total_ht = self._find_amount_by_label(
-            lines, r"TOTAL HORS TAXE\s*:\s*([\d\s]+,\d{2})"
+            lines, r"TOTAL HORS TAXE\s*:\s*([\d\s]+[\.,]\d{2})"
         )
 
         pose_sold = self._detect_pose(lines)
@@ -123,7 +123,7 @@ class DevisParser:
 
     def _find_ref_affaire(self, lines):
         for idx, line in enumerate(lines):
-            if "réf affaire" in line.lower():
+            if re.search(r"r.?f affaire", line, flags=re.IGNORECASE):
                 value = self._extract_after_colon(line)
                 if not value:
                     value = self._next_non_empty(lines, idx + 1)

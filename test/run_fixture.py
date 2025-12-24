@@ -5,7 +5,7 @@ from pathlib import Path
 
 from services.bdc_filler import BdcFiller
 from services.devis_parser import DevisParser
-from services.address_sanitizer import sanitize_client_address
+from services.data_normalizer import normalize_extracted_data
 
 
 KEYS_TO_ASSERT = [
@@ -83,7 +83,7 @@ def main() -> int:
     pdf_path = resolve_pdf_path(fixture_dir, repo_root, expected)
 
     devis_parser = DevisParser(debug=False)
-    data = sanitize_client_address(devis_parser.parse(pdf_path))
+    data = normalize_extracted_data(devis_parser.parse(pdf_path))
 
     data["pose_sold"] = bool(data.get("pose_sold"))
 

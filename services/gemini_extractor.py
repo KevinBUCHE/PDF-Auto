@@ -96,15 +96,18 @@ class GeminiExtractor:
 
     def _build_prompt(self, text: str) -> str:
         return (
-            "Analyse le devis suivant et renvoie uniquement un JSON strict avec les champs suivants : "
-            "devis_annee_mois, devis_num, devis_type, ref_affaire, client_nom, client_contact, "
-            "client_adresse1, client_adresse2, client_cp, client_ville, client_tel, client_email, "
-            "commercial_nom, commercial_tel, commercial_tel2, commercial_email, fourniture_ht, "
-            "prestations_ht, total_ht, pose_sold, pose_amount. "
-            "Return ONLY valid JSON, double quotes, no markdown. "
-            "Si une valeur est inconnue, renvoie une chaîne vide. "
-            "Utilise le texte suivant :\n"
-            f"{text}"
+            "Analyse le devis suivant et renvoie UNIQUEMENT un JSON strict (pas de markdown) avec les règles précises :\n"
+            "- devis_annee_mois : chaîne YYMM (ex: \"2512\"), pas de préfixe \"SRX\", pas d'année sur 4 chiffres.\n"
+            "- devis_type : chaîne (ex: \"AFF\").\n"
+            "- devis_num : chaîne de 6 chiffres uniquement (ex: \"040301\"), jamais le préfixe \"SRX\".\n"
+            "- ref_affaire, client_nom, client_contact, client_adresse1, client_adresse2, client_cp, client_ville, client_tel, client_email,\n"
+            "  commercial_nom, commercial_tel, commercial_tel2, commercial_email : chaînes.\n"
+            "- fourniture_ht, prestations_ht, total_ht, pose_amount : chaînes au format français avec espaces milliers et virgule décimale sur 2 décimales (ex: \"2 464,71\").\n"
+            "- pose_sold : booléen true/false.\n"
+            "- Si une valeur est inconnue, renvoyer une chaîne vide.\n"
+            "Return ONLY valid JSON, double quotes, no markdown.\n"
+            "Texte du devis :\n"
+            f"{text}\n"
         )
 
     def extract_from_text(self, text: str) -> GeminiResult:

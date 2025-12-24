@@ -9,7 +9,8 @@ POLLUTION_PATTERNS = [
     r"RCS RENNES",
     r"NAF 1623Z",
     r"SAS au capital",
-    r"Tél\\s*:\\s*02\\s*99\\s*97\\s*45\\s*40",
+    r"Tél\s*:\s*02\s*99\s*97\s*45\s*40",
+    r"t.?l\s*:",
 ]
 
 CP_VILLE_RE = re.compile(r"\b(\d{5})\s+(.+)")
