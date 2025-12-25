@@ -12,6 +12,7 @@ from services.devis_parser import DevisParser
 from services.bdc_filler import BdcFiller
 from services.data_normalizer import normalize_extracted_data
 from services.gemini_extractor import DEFAULT_GEMINI_MODEL, GeminiExtractor
+from services.address_sanitizer import has_riaux_pollution
 from utils.logging_util import append_log
 from utils.paths import (
     get_log_file_path,
@@ -286,6 +287,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 text = "\n".join(data.get("lines", []))
                 result = extractor.extract_from_text(text)
                 data = self._merge_data(data, result.data)
+                if has_riaux_pollution(data):
+                    self.log("Gemini a renvoyé une adresse RIAUX: relance avec avertissement.")
+                    result = extractor.extract_from_text(
+                        text,
+                        retry_note="Tu as inclus l’adresse RIAUX, recommence sans aucune donnée RIAUX côté client.",
+                    )
+                    data = self._merge_data(data, result.data)
+                    if has_riaux_pollution(data):
+                        data["parse_warning"] = "Gemini a renvoyé une adresse RIAUX (fallback local)."
+                        raise ValueError("Adresse RIAUX détectée")
                 pose_status = "gemini"
             except Exception as exc:  # pylint: disable=broad-except
                 self.log(f"Gemini ignoré pour {path.name}: {exc}")

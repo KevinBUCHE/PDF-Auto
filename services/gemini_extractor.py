@@ -6,6 +6,79 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+SYSTEM_INSTRUCTION = """Tu es un extracteur de données pour devis RIAUX (PDF). Objectif: produire un JSON STRICT et fiable pour remplir un “Bon de commande RIAUX”.
+
+RÈGLES ABSOLUES
+1) Tu dois retourner UNIQUEMENT un JSON valide (pas de texte autour).
+2) Ne JAMAIS inclure l’adresse de RIAUX / Groupe RIAUX dans les champs client.
+   - Exemples d’éléments INTERDITS côté client: “35560 BAZOUGES LA PEROUSE”, “groupe-riaux”, “RIAUX”, “BUCHE Kevin” (qui est le commercial).
+3) client_* = informations du CLIENT (constructeur / donneur d’ordre) uniquement.
+4) commercial_* = informations de la section “Contact commercial” (nom, email, téléphones).
+   - ATTENTION: le nom du commercial est généralement sur la ligne APRÈS “Contact commercial :”
+   - Ne prends JAMAIS un CP/Ville comme nom de commercial.
+5) ref_affaire: valeur après “Réf affaire :” (sans rajouter “Réf affaire :” dans la valeur).
+6) devis_annee_mois / devis_type / devis_num: extraire depuis SRXYYMMTTTNNNNNN (ex: SRX2511AFF037501).
+7) Montants:
+   - fourniture_ht = “PRIX DE LA FOURNITURE HT”
+   - prestations_ht = “PRIX PRESTATIONS ET SERVICES HT” (ou somme SERVICES + ECO si présent séparément)
+   - total_ht = “TOTAL HORS TAXE”
+   - Les montants doivent rester au format français “1 234,56”
+   - Vérifie cohérence: fourniture_ht + prestations_ht ≈ total_ht (tolérance 0,02). Si incohérent, corrige en te basant sur les libellés les plus explicites.
+8) Champs techniques: extraire modèle/gamme + finitions + essence + main courante + poteaux si présents. Si absent: "".
+
+SOURCES
+- Tu reçois en entrée un PDF de devis.
+- Utilise la mise en page (titres / blocs) pour distinguer CLIENT vs COMMERCIAL.
+- Ignore les lignes “DEVIS N …”, “Réalisé par …”, “Validité …”, tableaux de désignation, etc. si elles polluent.
+
+FORMAT DE SORTIE
+Retourne exactement ce JSON (toutes les clés présentes, même vides):
+{
+  "devis_annee_mois": "",
+  "devis_type": "",
+  "devis_num": "",
+  "ref_affaire": "",
+
+  "client_nom": "",
+  "client_contact": "",
+  "client_adresse1": "",
+  "client_adresse2": "",
+  "client_cp": "",
+  "client_ville": "",
+  "client_tel": "",
+  "client_email": "",
+
+  "commercial_nom": "",
+  "commercial_tel": "",
+  "commercial_tel2": "",
+  "commercial_email": "",
+
+  "fourniture_ht": "",
+  "prestations_ht": "",
+  "total_ht": "",
+
+  "esc_gamme": "",
+  "esc_essence": "",
+  "esc_main_courante": "",
+  "esc_main_courante_scellement": "",
+  "esc_nez_de_marches": "",
+
+  "esc_finition_marches": "",
+  "esc_finition_structure": "",
+  "esc_finition_mains_courante": "",
+  "esc_finition_contremarche": "",
+  "esc_finition_rampe": "",
+
+  "esc_tete_de_poteau": "",
+  "esc_poteaux_depart": "",
+
+  "pose_sold": true,
+  "pose_amount": "",
+
+  "parse_warning": ""
+}
+
+Return ONLY valid JSON, double quotes, no markdown."""
 
 
 @dataclass
@@ -32,6 +105,7 @@ class GeminiExtractor:
 
     def _build_request(self, prompt: str) -> dict:
         return {
+            "systemInstruction": {"parts": [{"text": SYSTEM_INSTRUCTION}]},
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {
                 "temperature": 0,
@@ -125,26 +199,17 @@ class GeminiExtractor:
         cleaned = self._strip_json_fences(repaired)
         return cleaned
 
-    def _build_prompt(self, text: str) -> str:
+    def _build_prompt(self, text: str, retry_note: str | None = None) -> str:
+        note = f"\nAttention: {retry_note}\n" if retry_note else ""
         return (
-            "Analyse le devis suivant et renvoie UNIQUEMENT un JSON strict (pas de markdown) avec les règles précises :\n"
-            "- devis_annee_mois : chaîne YYMM (ex: \"2512\"), pas de préfixe \"SRX\", pas d'année sur 4 chiffres.\n"
-            "- devis_type : chaîne (ex: \"AFF\").\n"
-            "- devis_num : chaîne de 6 chiffres uniquement (ex: \"040301\"), jamais le préfixe \"SRX\".\n"
-            "- ref_affaire, client_nom, client_contact, client_adresse1, client_adresse2, client_cp, client_ville, client_tel, client_email,\n"
-            "  commercial_nom, commercial_tel, commercial_tel2, commercial_email : chaînes.\n"
-            "- fourniture_ht, prestations_ht, total_ht, pose_amount : chaînes au format français avec espaces milliers et virgule décimale sur 2 décimales (ex: \"2 464,71\").\n"
-            "- pose_sold : booléen true/false.\n"
-            "- Si une valeur est inconnue, renvoyer une chaîne vide.\n"
-            "Return ONLY valid JSON, double quotes, no markdown.\n"
-            "Texte du devis :\n"
-            f"{text}\n"
+            "Analyse le devis suivant et renvoie uniquement le JSON demandé ci-dessus. "
+            "N'invente rien, laisse vide si absent." + note + "\nTexte du devis :\n" + text
         )
 
-    def extract_from_text(self, text: str) -> GeminiResult:
+    def extract_from_text(self, text: str, retry_note: str | None = None) -> GeminiResult:
         if not text or not text.strip():
             raise ValueError("Texte devis vide pour Gemini.")
-        prompt = self._build_prompt(text)
+        prompt = self._build_prompt(text, retry_note=retry_note)
         raw = self._call_model(prompt)
         data = self._parse_json(raw)
         self._log("Gemini JSON OK")

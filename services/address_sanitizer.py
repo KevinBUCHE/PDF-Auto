@@ -107,3 +107,17 @@ def sanitize_client_address(data: dict) -> dict:
     sanitized["client_adresse2"] = address_lines[1] if len(address_lines) > 1 else ""
     sanitized["client_adresse"] = "\n".join(address_lines)
     return sanitized
+
+
+def has_riaux_pollution(data: dict) -> bool:
+    candidates = []
+    for key in ("client_adresse", "client_adresse1", "client_adresse2", "client_ville"):
+        value = data.get(key)
+        if isinstance(value, str):
+            candidates.append(value)
+    cp = data.get("client_cp", "")
+    if isinstance(cp, str):
+        candidates.append(cp)
+    for line in data.get("lines") or []:
+        candidates.append(line)
+    return any(_contains_pollution(str(value)) for value in candidates)

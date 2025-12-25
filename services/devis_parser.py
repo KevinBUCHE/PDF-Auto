@@ -140,7 +140,19 @@ class DevisParser:
         return self._parse_contact_block(filtered_block)
 
     def _find_commercial_details(self, lines):
-        block = self._extract_block(lines, r"contact commercial\s*:") or []
+        block = []
+        anchor_re = re.compile(r"contact commercial\s*:", re.IGNORECASE)
+        stop_markers = ["réf affaire", "code client", "devis", "prix", "total", "prestations"]
+        for idx, line in enumerate(lines):
+            if not anchor_re.search(line):
+                continue
+            for next_line in lines[idx + 1 :]:
+                lowered = next_line.lower()
+                if any(marker in lowered for marker in stop_markers):
+                    break
+                if next_line:
+                    block.append(next_line)
+            break
         return self._parse_contact_block(block, allow_two_phones=True)
 
     def _extract_block(self, lines, anchor_pattern: str) -> list[str]:
