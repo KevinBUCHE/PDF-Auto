@@ -7,6 +7,8 @@ from typing import Callable, Optional
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import BooleanObject, IndirectObject, NameObject, TextStringObject
 
+from services.address_sanitizer import sanitize_client_address, strip_pollution_lines
+
 
 TEXT_FIELDS = {
     "bdc_client_adresse",
@@ -165,9 +167,8 @@ class BdcFiller:
             self._validate_output_fields(
                 output_path,
                 [
-                    "bdc_client_nom",
                     "bdc_devis_num",
-                    "bdc_ref_affaire",
+                    "bdc_devis_annee_mois",
                 ],
             )
         except Exception as exc:
@@ -227,18 +228,23 @@ class BdcFiller:
         return data.get("prestations_ht", "")
 
     def _build_client_adresse(self, data: dict) -> str:
-        direct = (data.get("client_adresse") or "").strip()
-        if direct:
-            return direct
-        lines = []
-        for key in ("client_adresse1", "client_adresse2"):
-            value = (data.get(key) or "").strip()
-            if value:
-                lines.append(value)
-        cp = (data.get("client_cp") or "").strip()
-        ville = (data.get("client_ville") or "").strip()
-        if cp or ville:
-            lines.append(" ".join(part for part in (cp, ville) if part))
+        clean_data = sanitize_client_address(data)
+        direct_lines = strip_pollution_lines(
+            (clean_data.get("client_adresse") or "").splitlines()
+        )
+        if direct_lines:
+            return "\n".join(direct_lines)
+        lines = strip_pollution_lines(
+            [
+                clean_data.get("client_adresse1", ""),
+                clean_data.get("client_adresse2", ""),
+            ]
+        )
+        cp = (clean_data.get("client_cp") or "").strip()
+        ville = (clean_data.get("client_ville") or "").strip()
+        cp_ville_line = " ".join(part for part in (cp, ville) if part).strip()
+        if cp_ville_line:
+            lines.append(cp_ville_line)
         return "\n".join(lines)
 
     def _build_values_to_set(
@@ -331,7 +337,7 @@ class BdcFiller:
             value = values.get(name)
             self._log(f"Validation champ {name}: {value!r}")
             if value in (None, "", TextStringObject("")):
-                raise ValueError("Fill failed: values not persisted")
+                raise ValueError(f"Champ critique manquant dans le PDF: {name}")
 
     def _extract_field_values(
         self, reader: PdfReader, field_names: set[str]
