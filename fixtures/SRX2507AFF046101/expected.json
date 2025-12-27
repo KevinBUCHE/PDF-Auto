@@ -1,52 +1,25 @@
 {
-  "source_pdf": "fixtures/SRX2511AFF037501/SRX2511AFF037501_20251202_161449.pdf",
-
-  "devis_annee_mois": "2511",
+  "source_pdf": "fixtures/SRX2507AFF046101/SRX2507AFF046101_20250731_153004.pdf",
+  "devis_annee_mois": "2507",
   "devis_type": "AFF",
-  "devis_num": "037501",
-
-  "ref_affaire": "SALEIX",
-  "date_devis": "02/12/2025",
-
-  "client_nom": "BERVAL MAISONS",
-  "client_code": "007222",
+  "devis_num": "046101",
+  "ref_affaire": "LECLERC",
+  "client_nom": "MAISONS CLAUDE RIZZON",
   "client_contact": "",
-  "client_adresse1": "7 ALLEE DES ACACIAS",
-  "client_adresse2": "",
-  "client_cp": "77100",
-  "client_ville": "MAREUIL LES MEAUX",
-  "client_tel": "01 60 24 72 72",
-  "client_fax": "01 60 24 72 79",
-  "client_mob": "06 20 10 34 75",
-  "client_email": "rmougeolle@maisonsberval.fr",
-
+  "client_adresse1": "1 ROUTE DE BRIEY",
+  "client_adresse2": "57160 CHATEL ST GERMAIN",
+  "client_cp": "57160",
+  "client_ville": "CHATEL ST GERMAIN",
+  "client_tel": "02 99 97 45 40",
+  "client_email": "",
   "commercial_nom": "BUCHE Kevin",
   "commercial_tel": "06 07 39 37 25",
-  "commercial_tel2": "",
+  "commercial_tel2": "03 87 60 46 44",
   "commercial_email": "kevin.buche@groupe-riaux.fr",
-
-  "fourniture_ht": "4 894,08",
-  "prestations_ht": "1 159,12",
-  "total_ht": "6 053,20",
-
+  "fourniture_ht": "1 100,43",
+  "prestations_ht": "954,50",
+  "total_ht": "",
   "pose_sold": true,
-  "pose_amount": "1 159,12",
-
-  "esc_gamme": "LEVANT",
-  "esc_essence": "Hêtre",
-
-  "esc_finition_marches": "Hêtre- Vernis Incolore",
-  "esc_finition_structure": "Métal - Thermolaqué effet texturé RAL 9005",
-  "esc_finition_mains_courante": "Hêtre - Vernis Incolore",
-  "esc_finition_contremarche": "",
-  "esc_finition_rampe": "Poteau Métal - Thermolaqué effet texturé RAL 9005 + lisses inox",
-
-  "esc_main_courante": "Ronde (MCR)",
-  "esc_main_courante_scellement": "",
-  "esc_nez_de_marches": "",
-
-  "esc_tete_de_poteau": "Elégie",
-  "esc_poteaux_depart": "Plat métal section 40x12 ",
-
+  "pose_amount": "",
   "parse_warning": ""
 }

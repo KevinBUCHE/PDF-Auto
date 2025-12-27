@@ -29,13 +29,13 @@ class DevisParser:
         commercial_details = self._find_commercial_details(lines)
 
         fourniture_ht = self._find_amount_by_label(
-            lines, r"PRIX DE LA FOURNITURE HT\s*:\s*([\d\s]+,\d{2})"
+            lines, r"PRIX DE LA FOURNITURE HT\s*:\s*([\d\s]+[\.,]\d{2})"
         )
         prestations_ht = self._find_amount_by_label(
-            lines, r"PRIX PRESTATIONS ET SERVICES HT\s*:\s*([\d\s]+,\d{2})"
+            lines, r"PRIX PRESTATIONS ET SERVICES HT\s*:\s*([\d\s]+[\.,]\d{2})"
         )
         total_ht = self._find_amount_by_label(
-            lines, r"TOTAL HORS TAXE\s*:\s*([\d\s]+,\d{2})"
+            lines, r"TOTAL HORS TAXE\s*:\s*([\d\s]+[\.,]\d{2})"
         )
 
         pose_sold = self._detect_pose(lines)
@@ -123,7 +123,7 @@ class DevisParser:
 
     def _find_ref_affaire(self, lines):
         for idx, line in enumerate(lines):
-            if "réf affaire" in line.lower():
+            if re.search(r"r.?f affaire", line, flags=re.IGNORECASE):
                 value = self._extract_after_colon(line)
                 if not value:
                     value = self._next_non_empty(lines, idx + 1)
@@ -131,11 +131,28 @@ class DevisParser:
         return ""
 
     def _find_client_details(self, lines):
-        block = self._extract_block(lines, r"code client\s*:")
-        return self._parse_contact_block(block)
+        block = self._extract_block(lines, r"code client\s*:") or []
+        filtered_block = [
+            line
+            for line in block
+            if not re.match(r"(réalisé par|devis|sas au capital|r\.?c\.?s\.?)", line, flags=re.IGNORECASE)
+        ]
+        return self._parse_contact_block(filtered_block)
 
     def _find_commercial_details(self, lines):
-        block = self._extract_block(lines, r"contact commercial\s*:")
+        block = []
+        anchor_re = re.compile(r"contact commercial\s*:", re.IGNORECASE)
+        stop_markers = ["réf affaire", "code client", "devis", "prix", "total", "prestations"]
+        for idx, line in enumerate(lines):
+            if not anchor_re.search(line):
+                continue
+            for next_line in lines[idx + 1 :]:
+                lowered = next_line.lower()
+                if any(marker in lowered for marker in stop_markers):
+                    break
+                if next_line:
+                    block.append(next_line)
+            break
         return self._parse_contact_block(block, allow_two_phones=True)
 
     def _extract_block(self, lines, anchor_pattern: str) -> list[str]:
@@ -182,7 +199,7 @@ class DevisParser:
                     if phone not in phones:
                         phones.append(phone)
             cp_ville = CP_VILLE_RE.search(line)
-            if cp_ville:
+            if cp_ville and not candidate_lines:
                 cp = cp_ville.group(1)
                 ville = cp_ville.group(2).strip()
                 continue
@@ -192,7 +209,11 @@ class DevisParser:
             if cleaned and self._has_letters(cleaned):
                 candidate_lines.append(cleaned)
 
-        nom = candidate_lines[0] if candidate_lines else ""
+        nom = ""
+        if candidate_lines:
+            first_candidate = candidate_lines[0]
+            if not re.match(r"(réalisé par|devis|sas au capital|r\.?c\.?s\.?)", first_candidate, flags=re.IGNORECASE):
+                nom = first_candidate
         adresse_lines = candidate_lines[1:] if len(candidate_lines) > 1 else []
         adresse1 = ""
         adresse2 = ""

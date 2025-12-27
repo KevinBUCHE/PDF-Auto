@@ -5,10 +5,13 @@ from pathlib import Path
 
 from services.bdc_filler import BdcFiller
 from services.devis_parser import DevisParser
+from services.data_normalizer import normalize_extracted_data
 
 
 KEYS_TO_ASSERT = [
     "client_nom",
+    "client_cp",
+    "client_ville",
     "commercial_nom",
     "ref_affaire",
     "devis_annee_mois",
@@ -80,11 +83,16 @@ def main() -> int:
     pdf_path = resolve_pdf_path(fixture_dir, repo_root, expected)
 
     devis_parser = DevisParser(debug=False)
-    data = devis_parser.parse(pdf_path)
+    data = normalize_extracted_data(devis_parser.parse(pdf_path))
 
     data["pose_sold"] = bool(data.get("pose_sold"))
 
     failures = assert_expected(data, expected)
+    filler = BdcFiller(logger=print)
+    address = filler._build_client_adresse(data)
+    for pollution in ("35560", "BAZOUGES", "VAUGARNY"):
+        if pollution.lower() in address.lower():
+            failures.append(f"Adresse polluée par {pollution!r}: {address!r}")
     if failures:
         for failure in failures:
             print(failure)
@@ -92,7 +100,6 @@ def main() -> int:
 
     template_path = resolve_template_path(repo_root)
     output_path = fixture_dir / "output_bdc.pdf"
-    filler = BdcFiller(logger=print)
     filler.fill(template_path, data, output_path)
 
     print("Fixture OK")

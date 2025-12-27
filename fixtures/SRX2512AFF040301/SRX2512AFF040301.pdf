@@ -1,0 +1,61 @@
+%PDF-1.4
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >> endobj
+4 0 obj << /Length 608 >> stream
+BT
+/F1 12 Tf
+72 720 Td
+14 TL
+(DEVIS N SRX2512AFF040301) Tj
+T*
+(Ralis par: Test User) Tj
+T*
+(Rf affaire : DUPONT) Tj
+T*
+(Date du devis : 15/12/2025) Tj
+T*
+(Code client : 012345) Tj
+T*
+(MAISONS TEST CLIENT) Tj
+T*
+(1 RUE DES FLEURS) Tj
+T*
+(57160 CHATEL ST GERMAIN) Tj
+T*
+(Tl : 06 01 02 03 04) Tj
+T*
+(Contact commercial :) Tj
+T*
+(DOE John) Tj
+T*
+(Tl : 07 00 00 00 00) Tj
+T*
+(E mail : john.doe@example.com) Tj
+T*
+(PRIX DE LA FOURNITURE HT : 2 464,71 EUR) Tj
+T*
+(PRIX PRESTATIONS ET SERVICES HT : 512,29 EUR) Tj
+T*
+(TOTAL HORS TAXE : 2 977,00 EUR) Tj
+T*
+(PRESTATIONS) Tj
+T*
+(Pose escalier complete) Tj
+T*
+ET
+endstream
+endobj
+5 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000241 00000 n 
+0000000899 00000 n 
+trailer << /Size 6 /Root 1 0 R >>
+startxref
+969
+%%EOF
