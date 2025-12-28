@@ -1,13 +1,10 @@
 import re
-from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import pdfplumber
 
-
 AMOUNT_RE = re.compile(r"([0-9][0-9\s\u202f]*[\.,][0-9]{2})")
 SRX_RE = re.compile(r"SRX(?P<yymm>\d{4})(?P<type>[A-Z]{3})(?P<num>\d{6})")
-LETTER_RE = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿ]")
 EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 PHONE_RE = re.compile(r"\b(?:\+33|0)\s?\d(?:[\s.-]?\d{2}){4}\b")
 CP_VILLE_RE = re.compile(r"\b(\d{5})\s+(.+)")
@@ -161,6 +158,7 @@ class DevisParser:
             "devis_type": devis_type,
             "ref_affaire": ref_affaire,
             "client_nom": client_details["nom"],
+            "client_contact": client_details["contact"],
             "client_adresse1": client_details["adresse1"],
             "client_adresse2": client_details["adresse2"],
             "client_adresse": client_details["adresse"],
@@ -168,9 +166,9 @@ class DevisParser:
             "client_ville": client_details["ville"],
             "client_tel": client_details["tel"],
             "client_email": client_details["email"],
-            "client_contact": client_details["contact"],
             "commercial_nom": commercial_details["nom"],
             "commercial_tel": commercial_details["tel"],
+            "commercial_tel2": commercial_details["tel2"],
             "commercial_email": commercial_details["email"],
             "esc_gamme": esc_gamme,
             "esc_finition_marches": esc_finition_marches,
@@ -188,7 +186,7 @@ class DevisParser:
             "esc_tete_de_poteau": esc_tete_de_poteau,
             "esc_poteaux_depart": esc_poteaux_depart,
             "pose_sold": pose_sold,
-            "pose_amount": pose_amount,
+            "pose_amount": "",
             "parse_warning": " ".join(warnings).strip(),
         }
         if self.debug:
@@ -243,15 +241,27 @@ class DevisParser:
             self._run_internal_debug_test(path or Path(""), data, warnings)
         return data
 
-    def _extract_text(self, path: Path) -> str:
+    def _extract_text(self, path: Path) -> tuple[str, list[str]]:
         if not path.exists():
             raise FileNotFoundError(path)
         text_parts = []
+        lines = []
         with pdfplumber.open(path) as pdf:
             for page in pdf.pages:
                 page_text = page.extract_text() or ""
+                if not page_text:
+                    continue
                 text_parts.append(page_text)
-        return "\n".join(text_parts)
+                for line in page_text.splitlines():
+                    cleaned = self._clean_line(line)
+                    if cleaned:
+                        lines.append(cleaned)
+        return "\n".join(text_parts), lines
+
+    def _clean_line(self, value: str) -> str:
+        value = value.replace("\u202f", " ")
+        value = re.sub(r"\s+", " ", value).strip()
+        return value
 
     def _find_amount_by_label(self, lines, pattern):
         regex = re.compile(pattern, re.IGNORECASE)
@@ -260,25 +270,6 @@ class DevisParser:
             if match:
                 return self._normalize_amount(match.group(1))
         return ""
-
-    def _extract_amount(self, text):
-        match = AMOUNT_RE.search(text)
-        if not match:
-            return ""
-        return self._normalize_amount(match.group(1))
-
-    def _sum_amounts(self, amounts: list[str]) -> str:
-        values = [amount for amount in amounts if amount]
-        if not values:
-            return ""
-        total = Decimal("0")
-        for value in values:
-            normalized = value.replace(" ", "").replace("\u202f", "").replace(",", ".")
-            try:
-                total += Decimal(normalized)
-            except InvalidOperation:
-                continue
-        return self._normalize_amount(f"{total:.2f}")
 
     def _normalize_amount(self, value: str) -> str:
         value = value.replace("\u202f", " ")
@@ -303,25 +294,26 @@ class DevisParser:
 
     def _find_ref_affaire(self, lines):
         for idx, line in enumerate(lines):
-            if line.strip().lower().startswith("réf affaire"):
-                parts = line.split(":", 1)
-                value = ""
-                if len(parts) > 1 and parts[1].strip():
-                    value = parts[1].strip()
-                else:
-                    for next_idx in range(idx + 1, len(lines)):
-                        if lines[next_idx].strip():
-                            value = lines[next_idx].strip()
-                            break
+            if re.search(r"r.?f affaire", line, flags=re.IGNORECASE):
+                value = self._extract_after_colon(line)
                 if not value:
-                    return ""
-                if value.lower().startswith("réf affaire"):
-                    value = value.split(":", 1)[-1].strip()
+                    value = self._next_non_empty(lines, idx + 1)
                 return value
         return ""
 
     def _find_client_details(self, lines):
-        code_index = None
+        block = self._extract_block(lines, r"code client\s*:") or []
+        filtered_block = [
+            line
+            for line in block
+            if not re.match(r"(réalisé par|devis|sas au capital|r\.?c\.?s\.?)", line, flags=re.IGNORECASE)
+        ]
+        return self._parse_contact_block(filtered_block)
+
+    def _find_commercial_details(self, lines):
+        block = []
+        anchor_re = re.compile(r"contact commercial\s*:", re.IGNORECASE)
+        stop_markers = ["réf affaire", "code client", "devis", "prix", "total", "prestations"]
         for idx, line in enumerate(lines):
             if CODE_CLIENT_RE.search(line):
                 code_index = idx
@@ -376,13 +368,15 @@ class DevisParser:
         if cp_ville_line:
             full_address_lines.append(cp_ville_line)
         return {
-            "nom": client_nom,
+            "nom": nom,
+            "contact": "",
             "adresse1": adresse1,
             "adresse2": adresse2,
             "adresse": "\n".join(line for line in full_address_lines if line),
             "cp": cp,
             "ville": ville,
             "tel": tel,
+            "tel2": tel2,
             "email": email,
             "contact": contact,
             "code_index": code_index,
@@ -616,51 +610,21 @@ class DevisParser:
                 return match.group(1).strip()
         return ""
 
-    def _find_tete_poteau(self, lines):
-        for line in lines:
-            if "TPA" in line and re.search(r"Poteau", line, re.IGNORECASE):
-                return "TPA"
+    def _next_non_empty(self, lines: list[str], start: int) -> str:
+        for idx in range(start, len(lines)):
+            if lines[idx].strip():
+                return lines[idx].strip()
         return ""
 
-    def _find_poteaux_depart(self, lines):
-        for line in lines:
-            if re.search(r"poteau[x]?\s+de\s+d[eé]part", line, re.IGNORECASE):
-                match = re.search(r":\s*(.+)", line)
-                if match:
-                    value = match.group(1).strip()
-                    value = re.sub(r"\([^)]*\)", "", value).strip()
-                    return value
-        return "" 
+    def _has_letters(self, value: str) -> bool:
+        return bool(LETTER_RE.search(value))
 
-    def _find_pose_details(self, lines):
-        pose_amount = ""
-        pose_sold = False
+    def _detect_pose(self, lines: list[str]) -> bool:
         saw_prestations = False
         for line in lines:
             if "PRESTATIONS" in line.upper():
                 saw_prestations = True
                 continue
-            if not saw_prestations:
-                continue
-            if re.search(r"\bpose\b", line, re.IGNORECASE):
-                amount = self._extract_pose_amount(line)
-                if amount:
-                    pose_sold = True
-                    pose_amount = amount
-                    break
-        return pose_sold, pose_amount
-
-    def _extract_pose_amount(self, line: str) -> str:
-        euro_matches = re.findall(
-            r"([0-9][0-9\s\u202f]*[\.,][0-9]{2})\s*€", line
-        )
-        if euro_matches:
-            return self._normalize_amount(euro_matches[-1])
-        matches = AMOUNT_RE.findall(line)
-        if not matches:
-            return ""
-        for match in reversed(matches):
-            normalized = self._normalize_amount(match)
-            if normalized not in {"1,00", "1.00"}:
-                return normalized
-        return ""
+            if saw_prestations and "pose" in line.lower():
+                return True
+        return False

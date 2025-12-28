@@ -8,15 +8,19 @@ from pathlib import Path
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from services.devis_parser import DevisParser
-from services.pose_detector import PoseDetector
+from services.rule_based_parser import RuleBasedParser
 from services.bdc_filler import BdcFiller
+from services.data_normalizer import normalize_extracted_data
+from services.gemini_extractor import DEFAULT_GEMINI_MODEL, GeminiExtractor
+from services.address_sanitizer import has_riaux_pollution
+from services.validator import validate_and_fix
 from utils.logging_util import append_log
 from utils.paths import (
     get_log_file_path,
     get_template_path,
     get_user_templates_dir,
 )
+from utils.settings_service import SettingsService
 
 APP_NAME = "BDC Generator"
 
@@ -38,7 +42,7 @@ class DropTable(QtWidgets.QTableWidget):
         super().__init__(0, 5, parent)
         self.setAcceptDrops(True)
         self.setHorizontalHeaderLabels(
-            ["Fichier devis", "Pose vendue", "Forcer", "Origine", "Statut"]
+            ["Fichier devis", "Pose vendue", "Forcer", "Auto pose", "Statut"]
         )
         header = self.horizontalHeader()
         header.setStretchLastSection(True)
@@ -90,6 +94,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.template_path = get_template_path(APP_NAME)
         self.bundled_template_path = self.base_dir / "Templates" / "bon de commande V1.pdf"
         self.log_file_path = get_log_file_path(APP_NAME)
+        self.settings_service = SettingsService(APP_NAME)
+        self.settings = self.settings_service.load()
+        self.gemini_api_key = self.settings.get("gemini_api_key", "")
+        self.gemini_model = self.settings.get("gemini_model", DEFAULT_GEMINI_MODEL)
+        self.gemini_enabled = bool(self.settings.get("gemini_enabled"))
+        self.gemini_extractor: GeminiExtractor | None = None
         self._loading_table = False
 
         central = QtWidgets.QWidget()
@@ -100,19 +110,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.open_templates_button = QtWidgets.QPushButton("Ouvrir le dossier Templates")
         self.choose_template_button = QtWidgets.QPushButton("Choisir un template…")
         self.open_log_button = QtWidgets.QPushButton("Ouvrir le log")
+        self.gemini_settings_button = QtWidgets.QPushButton("Paramètres Gemini")
+        self.gemini_toggle = QtWidgets.QLabel()
         self.open_templates_button.clicked.connect(self.open_templates_folder)
         self.choose_template_button.clicked.connect(self.choose_template_file)
         self.open_log_button.clicked.connect(self.open_log_file)
+        self.gemini_settings_button.clicked.connect(self.open_gemini_settings)
         template_layout.addWidget(self.template_status)
         template_layout.addStretch()
         template_layout.addWidget(self.open_templates_button)
         template_layout.addWidget(self.choose_template_button)
         template_layout.addWidget(self.open_log_button)
+        template_layout.addWidget(self.gemini_settings_button)
+        template_layout.addWidget(self.gemini_toggle)
         layout.addLayout(template_layout)
 
         info_label = QtWidgets.QLabel(
             "Glissez-déposez vos devis PDF SRX*. La pose est détectée automatiquement "
-            "(colonne Origine). Cochez “Forcer” pour ajuster la pose."
+            "(colonne Auto pose). Cochez “Forcer” pour ajuster la pose."
         )
         info_label.setWordWrap(True)
         layout.addWidget(info_label)
@@ -135,10 +150,13 @@ class MainWindow(QtWidgets.QMainWindow):
         buttons_layout = QtWidgets.QHBoxLayout()
         self.generate_button = QtWidgets.QPushButton("Générer les BDC")
         self.clear_button = QtWidgets.QPushButton("Vider la liste")
+        self.export_debug_button = QtWidgets.QPushButton("Exporter debug")
         self.generate_button.clicked.connect(self.generate_bdcs)
         self.clear_button.clicked.connect(self.clear_list)
+        self.export_debug_button.clicked.connect(self.export_debug)
         buttons_layout.addWidget(self.generate_button)
         buttons_layout.addWidget(self.clear_button)
+        buttons_layout.addWidget(self.export_debug_button)
         layout.addLayout(buttons_layout)
 
         self.logs = QtWidgets.QTextEdit()
@@ -211,6 +229,22 @@ class MainWindow(QtWidgets.QMainWindow):
         if not opened:
             self.log("Impossible d'ouvrir le fichier log.")
 
+    def export_debug(self):
+        row = self.table.currentRow()
+        if row < 0:
+            self.log("Sélectionnez un devis pour exporter le debug.")
+            return
+        file_item = self.table.item(row, 0)
+        if not file_item:
+            self.log("Impossible de trouver le devis sélectionné.")
+            return
+        path = Path(file_item.text())
+        exported_path = self.parser.export_debug(path)
+        if not exported_path:
+            self.log(f"Aucune donnée debug disponible pour {path.name}.")
+            return
+        self.log(f"Debug exporté: {exported_path}")
+
     def choose_template_file(self):
         file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
@@ -229,6 +263,91 @@ class MainWindow(QtWidgets.QMainWindow):
     def _is_srx_pdf(self, path: Path) -> bool:
         return path.suffix.lower() == ".pdf" and path.name.upper().startswith("SRX")
 
+    def _load_gemini_settings(self):
+        self.settings = self.settings_service.load()
+        self.gemini_api_key = str(self.settings.get("gemini_api_key", "") or "")
+        self.gemini_model = str(
+            self.settings.get("gemini_model", DEFAULT_GEMINI_MODEL) or DEFAULT_GEMINI_MODEL
+        )
+        self.gemini_enabled = bool(self.settings.get("gemini_enabled"))
+        self.gemini_extractor = None
+        state = "activé" if self.gemini_enabled and self.gemini_api_key else "désactivé"
+        self.gemini_toggle.setText(f"Gemini: {state}")
+
+    def _get_gemini_extractor(self) -> GeminiExtractor | None:
+        if self.gemini_extractor is not None:
+            return self.gemini_extractor
+        if not self.gemini_api_key:
+            return None
+        try:
+            self.gemini_extractor = GeminiExtractor(
+                api_key=self.gemini_api_key,
+                model=self.gemini_model,
+                logger=self.log,
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            self.log(f"Erreur initialisation Gemini: {exc}")
+            self.gemini_extractor = None
+        return self.gemini_extractor
+
+    def _merge_data(self, base: dict, override: dict | None) -> dict:
+        if not override:
+            return base
+        merged = dict(base)
+        for key, value in override.items():
+            if value in ("", None, []):
+                continue
+            merged[key] = value
+        return merged
+
+    def _extract_data(self, path: Path) -> tuple[dict, str]:
+        data = self.parser.parse(path)
+        pose_status = "rule"
+        data, validation_warnings = validate_and_fix(data)
+        for warning in validation_warnings:
+            self.log(f"Validation: {warning}")
+        if validation_warnings:
+            existing = data.get("parse_warning", "")
+            data["parse_warning"] = " ".join([existing, *validation_warnings]).strip()
+
+        extractor = self._get_gemini_extractor() if self.gemini_enabled else None
+        critical_keys = ["client_nom", "ref_affaire", "devis_num", "devis_annee_mois", "fourniture_ht", "prestations_ht", "total_ht"]
+        needs_fallback = extractor and any(not data.get(key) for key in critical_keys)
+        if needs_fallback and self.gemini_api_key:
+            try:
+                text = "\n".join(data.get("lines", []))
+                result = extractor.extract_from_text(text)
+                candidate = self._merge_data(data, result.data)
+                if has_riaux_pollution(candidate):
+                    self.log("Gemini a renvoyé une adresse RIAUX: relance avec avertissement.")
+                    result = extractor.extract_from_text(
+                        text,
+                        retry_note="Tu as inclus l’adresse RIAUX, recommence sans aucune donnée RIAUX côté client.",
+                    )
+                    candidate = self._merge_data(data, result.data)
+                candidate, val_w = validate_and_fix(candidate)
+                data = candidate
+                for warning in val_w:
+                    self.log(f"Validation: {warning}")
+                if val_w:
+                    existing = data.get("parse_warning", "")
+                    data["parse_warning"] = " ".join([existing, *val_w]).strip()
+                pose_status = "gemini"
+            except Exception as exc:  # pylint: disable=broad-except
+                self.log(f"Gemini ignoré pour {path.name}: {exc}")
+
+        data = normalize_extracted_data(data)
+        if data.get("parse_warning"):
+            self.log(f"{path.name}: {data['parse_warning']}")
+        return data, pose_status
+
+    def _origin_text(self, pose_status: str) -> str:
+        if pose_status == "gemini":
+            return "Gemini"
+        if pose_status == "auto":
+            return "Auto"
+        return "À vérifier"
+
     def handle_files_dropped(self, paths):
         for path in paths:
             if self._is_template_file(path):
@@ -241,24 +360,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.log(f"Déjà ajouté: {path}")
                 continue
             try:
-                data = self.parser.parse(path)
-                if data.get("parse_warning"):
-                    self.log(f"{path.name}: {data['parse_warning']}")
-                pose_sold, pose_amount, pose_status = self.pose_detector.detect_pose(data["lines"])
-                if pose_amount:
-                    data["pose_amount"] = pose_amount
-                data["pose_sold"] = pose_sold
+                data, pose_status = self._extract_data(path)
+                pose_sold = bool(data.get("pose_sold"))
                 self.add_row(path, pose_sold, pose_status)
                 self.devis_items[path] = DevisItem(
                     path=path,
                     data=data,
                     pose_sold=pose_sold,
-                    pose_source="auto" if pose_status == "auto" else "unreadable",
+                    pose_source=pose_status,
                     auto_pose_sold=pose_sold,
                     auto_pose_status=pose_status,
                 )
-                if pose_status == "unreadable":
-                    self.log(f"{path.name}: détection pose impossible, valeur par défaut = non.")
                 self.log(f"Ajouté: {path.name} (pose: {'oui' if pose_sold else 'non'})")
                 if "SRX2511AFF037501" in path.name:
                     self.log(
@@ -311,9 +423,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._set_pose_editable(row, False)
 
-        origin_item = QtWidgets.QTableWidgetItem(
-            "Auto" if pose_status == "auto" else "À vérifier"
-        )
+        origin_item = QtWidgets.QTableWidgetItem(self._origin_text(pose_status))
         origin_item.setFlags(origin_item.flags() ^ QtCore.Qt.ItemIsEditable)
         origin_item.setToolTip(origin_item.text())
         self.table.setItem(row, 3, origin_item)
@@ -362,13 +472,9 @@ class MainWindow(QtWidgets.QMainWindow):
                         else QtCore.Qt.Unchecked
                     )
                 devis_item.pose_sold = devis_item.auto_pose_sold
-                devis_item.pose_source = "auto"
+                devis_item.pose_source = devis_item.auto_pose_status
                 devis_item.data["pose_sold"] = devis_item.auto_pose_sold
-                origin_text = (
-                    "Auto"
-                    if devis_item.auto_pose_status == "auto"
-                    else "À vérifier"
-                )
+                origin_text = self._origin_text(devis_item.auto_pose_status)
                 origin_item.setText(origin_text)
                 origin_item.setToolTip(origin_text)
             return
@@ -390,7 +496,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.template_path.exists():
             self.refresh_template_status(log_missing=True)
             return
-        output_dir = self.base_dir / "BDC_Output"
+        output_dir = Path.home() / "Desktop" / "BDC_Output"
         output_dir.mkdir(exist_ok=True)
 
         for row in range(self.table.rowCount()):
@@ -423,7 +529,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _build_output_name(self, data: dict) -> str:
         client_nom = data.get("client_nom", "").strip() or "CLIENT"
-        ref_affaire = data.get("ref_affaire", "").strip() or "Ref INCONNUE"
+        ref_affaire = self._clean_ref_affaire(data.get("ref_affaire", ""))
+        ref_affaire = ref_affaire.strip() or "Ref INCONNUE"
         base = f"CDE {client_nom} Ref {ref_affaire}"
         base = re.sub(r'[\\/:*?"<>|]', " ", base)
         base = re.sub(r"\s+", " ", base).strip()

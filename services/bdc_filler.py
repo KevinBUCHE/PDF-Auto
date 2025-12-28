@@ -8,6 +8,8 @@ from typing import Callable, Optional
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import BooleanObject, IndirectObject, NameObject, TextStringObject
 
+from services.address_sanitizer import sanitize_client_address, strip_pollution_lines
+
 
 TEXT_FIELDS = {
     "bdc_client_adresse",
@@ -75,8 +77,9 @@ CHECKBOX_FIELDS = {
 }
 
 CRITICAL_FIELDS = {
-    "bdc_devis_annee_mois",
+    "bdc_client_nom",
     "bdc_devis_num",
+    "bdc_ref_affaire",
 }
 BANNED_CLIENT_MARKERS = ("riaux", "vaugarny", "bazouges", "35560")
 
@@ -103,7 +106,8 @@ class BdcFiller:
             field_names = self._collect_field_names(reader)
             bdc_fields = {name for name in field_names if str(name).startswith("bdc_")}
             self._log(f"Champs bdc_* détectés: {len(bdc_fields)}")
-            self._log(f"Liste champs bdc_*: {sorted(bdc_fields)}")
+            if self._logger:
+                self._log(f"Liste champs bdc_*: {sorted(bdc_fields)}")
 
             fields = self._build_fields(data)
             checkbox_states = self._build_checkbox_states(data)
@@ -134,6 +138,7 @@ class BdcFiller:
             }
             for page in writer.pages:
                 self._update_page_fields(writer, page, text_values)
+                self._apply_text_values(page, text_values)
 
             checkbox_values = {
                 key: value
@@ -166,9 +171,8 @@ class BdcFiller:
             self._validate_output_fields(
                 output_path,
                 [
-                    "bdc_client_nom",
-                    "bdc_date_commande",
                     "bdc_devis_num",
+                    "bdc_devis_annee_mois",
                 ],
             )
         except Exception as exc:
@@ -270,18 +274,23 @@ class BdcFiller:
         return data.get("prestations_ht", "")
 
     def _build_client_adresse(self, data: dict) -> str:
-        direct = (data.get("client_adresse") or "").strip()
-        if direct:
-            return direct
-        lines = []
-        for key in ("client_adresse1", "client_adresse2"):
-            value = (data.get(key) or "").strip()
-            if value:
-                lines.append(value)
-        cp = (data.get("client_cp") or "").strip()
-        ville = (data.get("client_ville") or "").strip()
-        if cp or ville:
-            lines.append(" ".join(part for part in (cp, ville) if part))
+        clean_data = sanitize_client_address(data)
+        direct_lines = strip_pollution_lines(
+            (clean_data.get("client_adresse") or "").splitlines()
+        )
+        if direct_lines:
+            return "\n".join(direct_lines)
+        lines = strip_pollution_lines(
+            [
+                clean_data.get("client_adresse1", ""),
+                clean_data.get("client_adresse2", ""),
+            ]
+        )
+        cp = (clean_data.get("client_cp") or "").strip()
+        ville = (clean_data.get("client_ville") or "").strip()
+        cp_ville_line = " ".join(part for part in (cp, ville) if part).strip()
+        if cp_ville_line:
+            lines.append(cp_ville_line)
         return "\n".join(lines)
 
     def _build_values_to_set(
@@ -334,6 +343,24 @@ class BdcFiller:
         except TypeError:
             writer.update_page_form_field_values(page, values)
 
+    def _apply_text_values(self, page, values: dict) -> None:
+        annots = page.get("/Annots")
+        if not annots:
+            return
+        annots = annots.get_object()
+        for annot in annots:
+            ao = annot.get_object()
+            field_obj, name = self._resolve_field_name(ao)
+            if name not in values:
+                continue
+            value = TextStringObject(values[name])
+            field_obj.update({NameObject("/V"): value, NameObject("/DV"): value})
+            ao.update({NameObject("/V"): value})
+            kids = field_obj.get("/Kids", [])
+            for kid in kids:
+                kid_obj = kid.get_object() if hasattr(kid, "get_object") else kid
+                kid_obj.update({NameObject("/V"): value})
+
     def _resolve_field_name(self, annotation):
         name = annotation.get("/T")
         field_obj = annotation
@@ -374,7 +401,7 @@ class BdcFiller:
             value = values.get(name)
             self._log(f"Validation champ {name}: {value!r}")
             if value in (None, "", TextStringObject("")):
-                raise ValueError("Fill failed: values not persisted")
+                raise ValueError(f"Champ critique manquant dans le PDF: {name}")
 
     def _extract_field_values(
         self, reader: PdfReader, field_names: set[str]
