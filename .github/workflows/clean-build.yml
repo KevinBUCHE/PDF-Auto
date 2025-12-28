@@ -1,0 +1,46 @@
+name: Windows deterministic build
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+
+jobs:
+  test-and-build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Run tests
+        run: |
+          python -m pytest
+
+      - name: Build executable
+        run: |
+          pyinstaller --noconfirm --clean --onefile --name "BDC_Generator" main.py --add-data "Templates;Templates"
+
+      - name: Smoke test CLI
+        run: |
+          .\dist\BDC_Generator.exe "fixtures\SRX2511AFF037501\SRX2511AFF037501.pdf" --output-dir "BDC_Output_ci" --template "Templates\bon de commande V1.pdf" --pose
+
+      - name: Zip distribution
+        run: |
+          Compress-Archive -Path dist\BDC_Generator.exe -DestinationPath dist\BDC_Generator.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bdc-generator-windows
+          path: dist/BDC_Generator.zip
