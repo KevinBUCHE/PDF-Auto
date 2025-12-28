@@ -85,7 +85,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(900, 600)
 
         self.devis_items = {}
-        self.parser = RuleBasedParser(debug=bool(os.getenv("BDC_DEBUG")))
+        self.settings = QtCore.QSettings("PDF-Auto", APP_NAME)
+        self.parser = DevisParser(debug=bool(os.getenv("BDC_DEBUG")))
+        self.pose_detector = PoseDetector()
         self.bdc_filler = BdcFiller(logger=self.log)
         self.base_dir = self._resolve_base_dir()
         self.templates_dir = get_user_templates_dir(APP_NAME)
@@ -130,6 +132,16 @@ class MainWindow(QtWidgets.QMainWindow):
         info_label.setWordWrap(True)
         layout.addWidget(info_label)
 
+        depot_layout = QtWidgets.QHBoxLayout()
+        depot_label = QtWidgets.QLabel("Adresse dépôt (utilisée si pose vendue)")
+        depot_label.setMinimumWidth(250)
+        self.depot_text = QtWidgets.QPlainTextEdit()
+        self.depot_text.setPlaceholderText("Ex: Dépôt ...")
+        self.depot_text.setFixedHeight(80)
+        depot_layout.addWidget(depot_label)
+        depot_layout.addWidget(self.depot_text)
+        layout.addLayout(depot_layout)
+
         self.table = DropTable()
         self.table.files_dropped.connect(self.handle_files_dropped)
         self.table.itemChanged.connect(self.handle_item_changed)
@@ -153,6 +165,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.setCentralWidget(central)
         self.refresh_template_status(log_missing=True)
+        self._load_settings()
 
     def log(self, message):
         self.logs.append(message)
@@ -160,6 +173,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def log_to_file(self, message):
         append_log(self.log_file_path, message)
+
+    def _load_settings(self):
+        depot_value = self.settings.value("depot_adresse", "")
+        if depot_value:
+            self.depot_text.setPlainText(str(depot_value))
+
+    def _save_settings(self):
+        self.settings.setValue("depot_adresse", self.depot_text.toPlainText())
 
     def _resolve_base_dir(self) -> Path:
         if getattr(sys, "frozen", False):
@@ -494,8 +515,8 @@ class MainWindow(QtWidgets.QMainWindow):
             try:
                 output_name = self._build_output_name(item.data)
                 output_path = output_dir / output_name
-                cleaned_data = normalize_extracted_data(item.data)
-                self.bdc_filler.fill(self.template_path, cleaned_data, output_path)
+                item.data["depot_adresse"] = self.depot_text.toPlainText().strip()
+                self.bdc_filler.fill(self.template_path, item.data, output_path)
                 status_item.setText("OK")
                 self.log(f"BDC généré: {output_path}")
             except Exception as exc:  # pylint: disable=broad-except
@@ -518,83 +539,9 @@ class MainWindow(QtWidgets.QMainWindow):
             base = base[:max_base].rstrip()
         return f"{base}.pdf"
 
-    def _clean_ref_affaire(self, value: str) -> str:
-        cleaned = (value or "").strip()
-        cleaned = re.sub(r"^réf\s+affaire\s*:?\s*", "", cleaned, flags=re.IGNORECASE)
-        return cleaned
-
-    def open_gemini_settings(self):
-        dialog = GeminiSettingsDialog(
-            parent=self,
-            settings=self.settings,
-            logger=self.log,
-            settings_service=self.settings_service,
-        )
-        if dialog.exec():
-            self._load_gemini_settings()
-            self.log("Paramètres Gemini enregistrés.")
-
-
-class GeminiSettingsDialog(QtWidgets.QDialog):
-    def __init__(
-        self,
-        parent: QtWidgets.QWidget | None,
-        settings: dict,
-        logger,
-        settings_service,
-    ):
-        super().__init__(parent)
-        self.settings = settings
-        self.settings_service = settings_service
-        self.logger = logger
-        self.setWindowTitle("Paramètres Gemini")
-        self.setModal(True)
-
-        layout = QtWidgets.QFormLayout(self)
-
-        self.enabled_checkbox = QtWidgets.QCheckBox("Utiliser Gemini pour l'extraction SRX")
-        self.enabled_checkbox.setChecked(bool(self.settings.get("gemini_enabled")))
-        layout.addRow(self.enabled_checkbox)
-
-        self.api_key_edit = QtWidgets.QLineEdit()
-        self.api_key_edit.setEchoMode(QtWidgets.QLineEdit.Password)
-        self.api_key_edit.setText(str(self.settings.get("gemini_api_key", "") or ""))
-        layout.addRow("Clé API Gemini", self.api_key_edit)
-
-        self.model_label = QtWidgets.QLabel(DEFAULT_GEMINI_MODEL)
-        layout.addRow("Modèle Gemini", self.model_label)
-
-        buttons = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
-        )
-        test_button = QtWidgets.QPushButton("Tester la clé")
-        buttons.addButton(test_button, QtWidgets.QDialogButtonBox.ActionRole)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        test_button.clicked.connect(self._test_key)
-        layout.addRow(buttons)
-
-    def accept(self):
-        self.settings_service.save(
-            {
-                "gemini_enabled": self.enabled_checkbox.isChecked(),
-                "gemini_api_key": self.api_key_edit.text().strip(),
-                "gemini_model": DEFAULT_GEMINI_MODEL,
-            }
-        )
-        super().accept()
-
-    def _test_key(self):
-        api_key = self.api_key_edit.text().strip()
-        model = DEFAULT_GEMINI_MODEL
-        try:
-            extractor = GeminiExtractor(api_key=api_key, model=model, logger=self.logger)
-            extractor.test_model()
-            QtWidgets.QMessageBox.information(
-                self, "Test clé Gemini", f"Test clé Gemini OK (model={model})"
-            )
-        except Exception as exc:  # pylint: disable=broad-except
-            QtWidgets.QMessageBox.critical(self, "Test clé Gemini", str(exc))
+    def closeEvent(self, event):
+        self._save_settings()
+        super().closeEvent(event)
 
 
 def main():
