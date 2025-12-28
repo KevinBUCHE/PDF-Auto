@@ -4,7 +4,6 @@ from typing import List, Tuple
 
 import pdfplumber
 
-
 AMOUNT_RE = re.compile(r"([0-9][0-9\s\u202f]*[\.,][0-9]{2})")
 SRX_RE = re.compile(r"SRX(\d{4})AFF(\d{1,6})", re.IGNORECASE)
 DEVIS_RE = re.compile(r"(DEVIS\s*N[°o]?\s*SRX[^\s]*)", re.IGNORECASE)
@@ -126,11 +125,18 @@ class DevisParser:
         if not path.exists():
             raise FileNotFoundError(path)
         text_parts = []
+        lines = []
         with pdfplumber.open(path) as pdf:
             for page in pdf.pages:
                 page_text = page.extract_text() or ""
+                if not page_text:
+                    continue
                 text_parts.append(page_text)
-        return "\n".join(text_parts)
+                for line in page_text.splitlines():
+                    cleaned = self._clean_line(line)
+                    if cleaned:
+                        lines.append(cleaned)
+        return "\n".join(text_parts), lines
 
     def _find_amount_before(self, lines, label):
         for idx, line in enumerate(lines):
@@ -148,13 +154,9 @@ class DevisParser:
                         return amount
         return ""
 
-    def _extract_amount(self, text):
-        match = AMOUNT_RE.search(text)
-        if not match:
-            return ""
-        value = match.group(1)
+    def _normalize_amount(self, value: str) -> str:
         value = value.replace("\u202f", " ")
-        value = value.replace(" ", "")
+        value = re.sub(r"\s+", " ", value).strip()
         if "," in value and "." in value:
             value = value.replace(".", "")
         if "." in value:
