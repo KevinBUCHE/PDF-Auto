@@ -12,15 +12,25 @@ EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 PHONE_RE = re.compile(r"\b(?:\+33|0)\s?\d(?:[\s.-]?\d{2}){4}\b")
 CP_VILLE_RE = re.compile(r"\b(\d{5})\s+(.+)")
 NOISE_HEADER_RE = re.compile(
-    r"^(r[eé]alis[eé]\s+par|date\s+du\s+devis|r[eé]f\s+affaire|client|commercial|technique)\b|"
-    r"\bdevis\b",
+    r"\b(r[eé]alis[eé]\s+par|date\s+du\s+devis|r[eé]f\s+affaire|devis|facture|bon de commande)\b",
     re.IGNORECASE,
 )
+CODE_CLIENT_RE = re.compile(r"\bcode\s*client\b", re.IGNORECASE)
 STREET_HINT_RE = re.compile(
     r"\b(rue|allee|all[ée]e|avenue|av\.?|bd|boulevard|chemin|route|impasse|zac|za)\b",
     re.IGNORECASE,
 )
-LEGAL_NOISE_RE = re.compile(r"\b(sas|sarl|rcs|naf|siret|capital|eur)\b", re.IGNORECASE)
+LEGAL_NOISE_RE = re.compile(
+    r"\b(sas|sarl|rcs|r\.c\.s|naf|siret|capital|eur|au capital)\b|b\s?\d+",
+    re.IGNORECASE,
+)
+TEL_MARKER_RE = re.compile(r"\b(t[eé]l|tel|fax)\b", re.IGNORECASE)
+ADDRESS_STOP_RE = re.compile(
+    r"(t[eé]l|tel|fax|mail|email|contact\s+commercial|validit[eé]|d[ée]signation)",
+    re.IGNORECASE,
+)
+BANNED_CLIENT_TOKENS = ("devis", "réalisé par", "riaux", "vaugarny", "bazouges", "35560")
+DEVIS_LINE_RE = re.compile(r"DEVIS\s*N[°º]?\s*(SRX\S+)", re.IGNORECASE)
 ESSENCE_RE = re.compile(
     r"\b(ch[eê]ne|h[eê]tre|fr[eê]ne|sapin|pin|hêtre|chêne)\b", re.IGNORECASE
 )
@@ -30,44 +40,105 @@ class DevisParser:
     def __init__(self, debug: bool = False):
         self.debug = debug
 
+    def _clean_line(self, value: str) -> str:
+        value = re.sub(r"[^\wÀ-ÖØ-öø-ÿ&'()/\-\., :°]", " ", value)
+        value = re.sub(r"\s+", " ", value).strip()
+        return value
+
+    def _is_probable_company_name(self, value: str) -> bool:
+        if not value:
+            return False
+        cleaned = self._clean_line(value)
+        lowered = cleaned.lower()
+        if "vaugarny" in lowered:
+            return False
+        if CP_VILLE_RE.search(cleaned):
+            return False
+        if ":" in cleaned:
+            return False
+        if NOISE_HEADER_RE.search(lowered):
+            return False
+        if not (3 <= len(cleaned) <= 60):
+            return False
+        allowed_chars = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ&\-/ ]", cleaned)
+        if not allowed_chars:
+            return False
+        if (len(allowed_chars) / max(len(cleaned), 1)) < 0.7:
+            return False
+        return True
+
+    def _dump_lines_around(self, lines: list[str], index: int, radius: int = 7) -> str:
+        if index is None:
+            return ""
+        start = max(index - radius, 0)
+        end = min(index + radius + 1, len(lines))
+        snippet = [f"{idx}:{lines[idx]}" for idx in range(start, end)]
+        return "\n".join(snippet)
+
     def parse(self, path: Path) -> dict:
         text = self._extract_text(path)
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        lines = [line.strip() for line in text.splitlines()]
+        return self._parse_lines(lines, path)
+
+    def _parse_lines(self, lines: list[str], path: Path | None = None) -> dict:
         warnings = []
-        if not lines:
+        normalized_lines = [self._clean_line(line) for line in lines if line is not None]
+        if not normalized_lines:
             warnings.append("Texte du devis illisible ou vide.")
 
         fourniture_ht = self._find_amount_by_label(
-            lines, r"PRIX DE LA FOURNITURE HT\s*:\s*([\d\s]+,\d{2})"
+            normalized_lines, r"PRIX DE LA FOURNITURE HT\s*:\s*([\d\s]+,\d{2})"
         )
         prestations_ht = self._find_amount_by_label(
-            lines, r"PRIX PRESTATIONS ET SERVICES HT\s*:\s*([\d\s]+,\d{2})"
+            normalized_lines, r"PRIX PRESTATIONS ET SERVICES HT\s*:\s*([\d\s]+,\d{2})"
         )
         total_ht = self._find_amount_by_label(
-            lines, r"TOTAL HORS TAXE\s*:\s*([\d\s]+,\d{2})"
+            normalized_lines, r"TOTAL HORS TAXE\s*:\s*([\d\s]+,\d{2})"
         )
-        if not prestations_ht:
-            services_ht = self._find_amount_by_label(
-                lines, r"PRIX.*SERVICES.*HT\s*:\s*([\d\s]+,\d{2})"
-            )
-            eco_ht = self._find_amount_by_label(
-                lines, r"PRIX.*ECO.*HT\s*:\s*([\d\s]+,\d{2})"
-            )
-            prestations_ht = self._sum_amounts([services_ht, eco_ht])
-            if prestations_ht and not fourniture_ht:
-                warnings.append(
-                    "Fourniture absente: prestations calculées depuis SERVICES/ECO."
-                )
+        devis_full, devis_num, devis_type = self._find_devis_reference(normalized_lines)
+        ref_affaire = self._find_ref_affaire(normalized_lines)
+        client_details = self._find_client_details(normalized_lines)
+        commercial_details = self._find_commercial_details(normalized_lines)
+        esc_gamme = self._find_modele(normalized_lines)
+        finitions = self._extract_finitions(normalized_lines)
+        esc_finition_marches = finitions.get("marche", "")
+        esc_finition_structure = finitions.get("structure", "")
+        esc_finition_mains_courante = finitions.get("main_courante", "")
+        esc_finition_contremarche = finitions.get("contremarche", "")
+        esc_finition_rampe = finitions.get("rampe", "")
+        remplissage = self._extract_remplissage(normalized_lines, warnings)
+        esc_main_courante, esc_main_courante_scellement = self._find_main_courante(
+            normalized_lines
+        )
+        esc_nez_de_marches = self._find_nez_de_marches(normalized_lines)
+        esc_essence = self._extract_essence(
+            [
+                esc_finition_marches,
+                esc_finition_structure,
+                esc_finition_mains_courante,
+                esc_finition_contremarche,
+                esc_finition_rampe,
+            ]
+        )
+        esc_tete_de_poteau = self._find_tete_poteau(normalized_lines)
+        esc_poteaux_depart = self._find_poteaux_depart(normalized_lines)
+        pose_sold, pose_amount = self._find_pose_details(normalized_lines)
 
-        devis_match = self._find_devis_reference(lines)
-        devis_annee_mois = devis_match[0] if devis_match else ""
-        devis_num = devis_match[1] if devis_match else ""
-        devis_type = devis_match[2] if devis_match else ""
-
-        ref_affaire = self._find_ref_affaire(lines)
-        client_details = self._find_client_details(lines)
-        commercial_details = self._find_commercial_details(lines)
-        srx_debug = self.debug and "SRX2511AFF037501" in text.replace(" ", "")
+        srx_debug = self.debug and path and "SRX2511AFF037501" in path.name
+        if client_details["nom"] and any(
+            banned in client_details["nom"].lower() for banned in ("réalisé par",)
+        ):
+            dump = self._dump_lines_around(normalized_lines, client_details.get("code_index"))
+            warnings.append(
+                "Client: nom contient 'Réalisé par'.\n"
+                f"[PARSE] context around Code client:\n{dump}"
+            )
+        if CP_VILLE_RE.search(commercial_details["nom"]):
+            dump = self._dump_lines_around(normalized_lines, commercial_details.get("contact_index"))
+            warnings.append(
+                "Commercial: nom ressemble à un CP/Ville.\n"
+                f"[PARSE] context around contact commercial:\n{dump}"
+            )
         if srx_debug:
             if "réalisé par" in client_details["nom"].lower():
                 warnings.append("Client SRX: nom contient 'Réalisé par'.")
@@ -78,41 +149,21 @@ class DevisParser:
         if not ref_affaire:
             warnings.append("Réf affaire introuvable.")
         if not client_details["nom"]:
-            warnings.append("Client introuvable (ancre 'Code client :').")
-        esc_gamme = self._find_modele(lines)
-        finitions = self._extract_finitions(lines)
-        esc_finition_marches = finitions.get("marche", "")
-        esc_finition_structure = finitions.get("structure", "")
-        esc_finition_mains_courante = finitions.get("main_courante", "")
-        esc_finition_contremarche = finitions.get("contremarche", "")
-        esc_finition_rampe = finitions.get("rampe", "")
-        esc_main_courante, esc_main_courante_scellement = self._find_main_courante(lines)
-        esc_nez_de_marches = self._find_nez_de_marches(lines)
-        esc_essence = self._extract_essence(
-            [
-                esc_finition_marches,
-                esc_finition_structure,
-                esc_finition_mains_courante,
-                esc_finition_contremarche,
-                esc_finition_rampe,
-            ]
-        )
-        esc_tete_de_poteau = self._find_tete_poteau(lines)
-        esc_poteaux_depart = self._find_poteaux_depart(lines)
-        pose_sold, pose_amount = self._find_pose_details(lines)
+            warnings.append("Client introuvable (ancre 'Code client').")
 
         data = {
-            "lines": lines,
+            "lines": normalized_lines,
             "fourniture_ht": fourniture_ht,
             "prestations_ht": prestations_ht,
             "total_ht": total_ht,
-            "devis_annee_mois": devis_annee_mois,
+            "devis_annee_mois": devis_full,
             "devis_num": devis_num,
             "devis_type": devis_type,
             "ref_affaire": ref_affaire,
             "client_nom": client_details["nom"],
             "client_adresse1": client_details["adresse1"],
             "client_adresse2": client_details["adresse2"],
+            "client_adresse": client_details["adresse"],
             "client_cp": client_details["cp"],
             "client_ville": client_details["ville"],
             "client_tel": client_details["tel"],
@@ -127,6 +178,9 @@ class DevisParser:
             "esc_finition_mains_courante": esc_finition_mains_courante,
             "esc_finition_contremarche": esc_finition_contremarche,
             "esc_finition_rampe": esc_finition_rampe,
+            "esc_section_remplissage_garde_corps_rampant": remplissage["rampant"],
+            "esc_section_remplissage_garde_corps_etage": remplissage["etage"],
+            "esc_remplissage_garde_corps_soubassement": remplissage["soubassement"],
             "esc_essence": esc_essence,
             "esc_main_courante": esc_main_courante,
             "esc_main_courante_scellement": esc_main_courante_scellement,
@@ -139,7 +193,10 @@ class DevisParser:
         }
         if self.debug:
             data["debug"] = [
-                f"devis_annee_mois={devis_annee_mois}",
+                f"[PARSE] client_nom={client_details['nom']}",
+                f"[PARSE] client_cp_ville={client_details['cp']} {client_details['ville']}".strip(),
+                f"[PARSE] commercial_nom={commercial_details['nom']}",
+                f"devis_annee_mois={devis_full}",
                 f"devis_type={devis_type}",
                 f"devis_num={devis_num}",
                 f"ref_affaire={ref_affaire}",
@@ -165,6 +222,9 @@ class DevisParser:
                 f"esc_finition_mains_courante={esc_finition_mains_courante}",
                 f"esc_finition_contremarche={esc_finition_contremarche}",
                 f"esc_finition_rampe={esc_finition_rampe}",
+                f"esc_remplissage_rampant={remplissage['rampant']}",
+                f"esc_remplissage_etage={remplissage['etage']}",
+                f"esc_remplissage_soubassement={remplissage['soubassement']}",
                 f"esc_essence={esc_essence}",
                 f"esc_main_courante={esc_main_courante}",
                 f"esc_main_courante_scellement={esc_main_courante_scellement}",
@@ -172,7 +232,7 @@ class DevisParser:
                 f"esc_tete_de_poteau={esc_tete_de_poteau}",
                 f"esc_poteaux_depart={esc_poteaux_depart}",
             ]
-            if srx_debug:
+            if srx_debug and path:
                 data["debug"].extend(
                     [
                         f"srx_client_nom={client_details['nom']}",
@@ -180,6 +240,7 @@ class DevisParser:
                         f"srx_commercial_nom={commercial_details['nom']}",
                     ]
                 )
+            self._run_internal_debug_test(path or Path(""), data, warnings)
         return data
 
     def _extract_text(self, path: Path) -> str:
@@ -230,14 +291,15 @@ class DevisParser:
 
     def _find_devis_reference(self, lines):
         for line in lines:
-            if "DEVIS" not in line.upper():
-                continue
-            match = SRX_RE.search(line.replace(" ", ""))
+            match = DEVIS_LINE_RE.search(line)
             if match:
-                yymm = match.group("yymm")
-                num = match.group("num")
-                return yymm, num, match.group("type")
-        return None
+                full_value = match.group(0).strip()
+                sr = match.group(1)
+                sr_match = SRX_RE.search(sr)
+                num = sr_match.group("num") if sr_match else ""
+                srx_type = sr_match.group("type") if sr_match else ""
+                return full_value, num, srx_type
+        return "", "", ""
 
     def _find_ref_affaire(self, lines):
         for idx, line in enumerate(lines):
@@ -261,116 +323,80 @@ class DevisParser:
     def _find_client_details(self, lines):
         code_index = None
         for idx, line in enumerate(lines):
-            if "code client" in line.lower():
+            if CODE_CLIENT_RE.search(line):
                 code_index = idx
                 break
+        defaults = {
+            "nom": "",
+            "adresse1": "",
+            "adresse2": "",
+            "adresse": "",
+            "cp": "",
+            "ville": "",
+            "tel": "",
+            "email": "",
+            "contact": "",
+            "code_index": None,
+        }
         if code_index is None:
-            return {
-                "nom": "",
-                "adresse1": "",
-                "adresse2": "",
-                "cp": "",
-                "ville": "",
-                "tel": "",
-                "email": "",
-                "contact": "",
-            }
+            return defaults
+
         client_nom = ""
-        best_score = None
-        best_candidate = ""
-        scan_start = max(code_index - 8, 0)
-        for prev in range(code_index - 1, scan_start - 1, -1):
-            candidate = lines[prev].strip()
+        name_line_index = code_index
+        idx = code_index + 1
+        while idx < len(lines):
+            candidate = self._clean_line(lines[idx])
+            if not candidate:
+                idx += 1
+                continue
+            if self._is_address_stop(candidate):
+                break
+            if self._is_banned_client_line(candidate):
+                idx += 1
+                continue
+            client_nom = candidate
+            name_line_index = idx
+            break
+        address_lines = []
+        idx = name_line_index + 1
+        while idx < len(lines):
+            candidate = self._clean_line(lines[idx])
+            idx += 1
             if not candidate:
                 continue
-            lowered = candidate.lower()
-            if "vaugarny" in lowered:
-                continue
-            if re.search(r"\d{5}", candidate):
-                continue
-            if CP_VILLE_RE.search(candidate):
-                continue
-            if ":" in candidate and NOISE_HEADER_RE.search(lowered):
-                continue
-            score = 0
-            if not re.search(r"\d", candidate):
-                score += 2
-            if ":" not in candidate:
-                score += 2
-            if 3 <= len(candidate) <= 40:
-                score += 1
-            letters = re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ ]", candidate)
-            if letters and (len(letters) / max(len(candidate), 1)) >= 0.7:
-                score += 2
-            if NOISE_HEADER_RE.search(candidate):
-                score -= 5
-            if CP_VILLE_RE.search(candidate):
-                score -= 3
-            if best_score is None or score > best_score:
-                best_score = score
-                best_candidate = candidate
-        if best_score is not None:
-            client_nom = best_candidate
-        if not client_nom:
-            for prev in range(code_index - 1, -1, -1):
-                candidate = lines[prev].strip()
-                if not candidate:
-                    continue
-                lowered = candidate.lower()
-                if (
-                    lowered.startswith("date du devis")
-                    or lowered.startswith("réf affaire")
-                    or "devis" in lowered
-                ):
-                    continue
-                client_nom = candidate
+            if self._is_address_stop(candidate):
                 break
-        address_lines = []
-        for idx in range(code_index + 1, len(lines)):
-            line = lines[idx].strip()
-            if not line:
-                continue
-            lowered = line.lower()
-            if self._is_legal_noise(line):
-                continue
-            stripped, should_stop = self._strip_after_keywords(
-                line, ["tél", "tel", "contact commercial"]
-            )
-            if should_stop:
-                if stripped and not self._is_legal_noise(stripped):
-                    address_lines.append(stripped)
-                break
-            if "vaugarny" in lowered:
-                continue
-            address_lines.append(line)
+            address_lines.append(candidate)
         contact, address_lines = self._extract_contact(address_lines)
         adresse1, adresse2, cp, ville = self._split_address_lines(address_lines)
         tel = self._find_phone(lines[code_index : code_index + 6])
         email = self._find_email(lines[code_index : code_index + 6])
+        full_address_lines = list(address_lines)
+        cp_ville_line = " ".join(part for part in (cp, ville) if part).strip()
+        if cp_ville_line:
+            full_address_lines.append(cp_ville_line)
         return {
             "nom": client_nom,
             "adresse1": adresse1,
             "adresse2": adresse2,
+            "adresse": "\n".join(line for line in full_address_lines if line),
             "cp": cp,
             "ville": ville,
             "tel": tel,
             "email": email,
             "contact": contact,
+            "code_index": code_index,
         }
 
     def _is_legal_noise(self, line: str) -> bool:
         return LEGAL_NOISE_RE.search(line) is not None
 
-    def _strip_after_keywords(self, line: str, keywords: list[str]) -> tuple[str, bool]:
+    def _is_address_stop(self, line: str) -> bool:
+        return bool(ADDRESS_STOP_RE.search(line))
+
+    def _is_banned_client_line(self, line: str) -> bool:
         lowered = line.lower()
-        match_positions = [
-            lowered.find(keyword) for keyword in keywords if lowered.find(keyword) != -1
-        ]
-        if not match_positions:
-            return line.strip(), False
-        cut_at = min(match_positions)
-        stripped = line[:cut_at].strip()
-        return stripped, True
+        return any(token in lowered for token in BANNED_CLIENT_TOKENS)
 
     def _extract_contact(self, lines):
         filtered = []
@@ -386,7 +412,6 @@ class DevisParser:
     def _split_address_lines(self, address_lines):
         cp = ""
         ville = ""
-        remaining = []
         cp_candidates = []
         for idx, line in enumerate(address_lines):
             match = CP_VILLE_RE.search(line)
@@ -395,27 +420,20 @@ class DevisParser:
                     {
                         "cp": match.group(1),
                         "ville": match.group(2).strip(),
-                        "prefix": line[: match.start()].strip(),
                         "prev_line": address_lines[idx - 1].strip() if idx > 0 else "",
                         "index": idx,
                     }
                 )
-                continue
-            remaining.append(line)
-        if cp_candidates:
-            cp_choice = self._choose_cp_ville(cp_candidates)
-            cp = cp_choice["cp"]
-            ville = cp_choice["ville"]
-            candidate_by_index = {candidate["index"]: candidate for candidate in cp_candidates}
-            rebuilt = []
-            for idx, line in enumerate(address_lines):
-                candidate = candidate_by_index.get(idx)
-                if candidate:
-                    if candidate is cp_choice and candidate["prefix"]:
-                        rebuilt.append(candidate["prefix"])
-                    continue
-                rebuilt.append(line)
-            remaining = rebuilt
+        if not cp_candidates:
+            adresse1 = address_lines[0] if address_lines else ""
+            adresse2 = " ".join(address_lines[1:]) if len(address_lines) > 1 else ""
+            return adresse1, adresse2, cp, ville
+        cp_choice = self._choose_cp_ville(cp_candidates)
+        cp = cp_choice["cp"]
+        ville = cp_choice["ville"]
+        remaining = [
+            line for idx, line in enumerate(address_lines) if idx != cp_choice["index"]
+        ]
         adresse1 = remaining[0] if remaining else ""
         adresse2 = " ".join(remaining[1:]) if len(remaining) > 1 else ""
         return adresse1, adresse2, cp, ville
@@ -428,10 +446,7 @@ class DevisParser:
             prev_line = candidate["prev_line"]
             if re.search(r"\d+", prev_line) and STREET_HINT_RE.search(prev_line):
                 score += 3
-            if candidate["ville"] and (
-                candidate["ville"].isupper()
-                or re.search(r"[A-Z].*[A-Z]", candidate["ville"])
-            ):
+            if self._is_majority_upper(candidate["ville"]):
                 score += 1
             if LEGAL_NOISE_RE.search(prev_line):
                 score -= 3
@@ -440,49 +455,42 @@ class DevisParser:
                 best = candidate
         return best if best is not None else candidates[-1]
 
+    def _is_majority_upper(self, value: str) -> bool:
+        letters = [char for char in value if char.isalpha()]
+        if not letters:
+            return False
+        upper_count = sum(1 for char in letters if char.isupper())
+        return (upper_count / len(letters)) >= 0.6
+
     def _find_commercial_details(self, lines):
         for idx, line in enumerate(lines):
             lowered = line.lower()
             if "contact commercial" in lowered:
                 name = ""
-                match = re.search(r"contact commercial\s*:\s*(.+)", line, re.IGNORECASE)
-                if match:
-                    name = match.group(1).strip()
-                if not name:
-                    for next_idx in range(idx + 1, min(idx + 7, len(lines))):
-                        candidate = lines[next_idx].strip()
-                        if self._is_valid_commercial_name_candidate(candidate):
-                            name = candidate
-                            break
-                if not name:
-                    for prev in range(idx - 1, max(idx - 7, -1), -1):
-                        candidate = lines[prev].strip()
-                        if self._is_valid_commercial_name_candidate(candidate):
-                            name = candidate
-                            break
-                if name.lower().startswith("contact commercial"):
-                    name = ""
+                for next_idx in range(idx + 1, min(idx + 9, len(lines))):
+                    candidate = self._clean_line(lines[next_idx])
+                    if not candidate:
+                        continue
+                    if CP_VILLE_RE.search(candidate):
+                        continue
+                    if TEL_MARKER_RE.search(candidate):
+                        continue
+                    if "@" in candidate:
+                        continue
+                    if NOISE_HEADER_RE.search(candidate.lower()):
+                        continue
+                    name = candidate
+                    break
                 search_start = max(idx - 3, 0)
-                search_lines = lines[search_start : idx + 9]
+                search_lines = lines[search_start : idx + 11]
                 return {
                     "nom": name,
                     "tel": self._find_phone(search_lines),
                     "email": self._find_email(search_lines),
+                    "contact_index": idx,
                 }
-        return {"nom": "", "tel": "", "email": ""}
+        return {"nom": "", "tel": "", "email": "", "contact_index": None}
 
-    def _is_valid_commercial_name_candidate(self, candidate: str) -> bool:
-        if not candidate:
-            return False
-        lowered = candidate.lower()
-        if CP_VILLE_RE.search(candidate):
-            return False
-        if "@" in candidate:
-            return False
-        if any(keyword in lowered for keyword in ("tél", "tel", "fax", "code client")):
-            return False
-        words = [word for word in candidate.split() if LETTER_RE.search(word)]
-        return len(words) >= 2
 
     def _find_phone(self, lines):
         for line in lines:
@@ -497,6 +505,21 @@ class DevisParser:
             if match:
                 return match.group(0).strip()
         return ""
+
+    def _run_internal_debug_test(self, path: Path, data: dict, warnings: list[str]) -> None:
+        if path.name != "SRX2511AFF037501_20251202_161449.pdf":
+            return
+        failures = []
+        if data.get("client_nom") != "BERVAL MAISONS":
+            failures.append("client_nom attendu 'BERVAL MAISONS'")
+        if CP_VILLE_RE.search(data.get("commercial_nom", "")):
+            failures.append("commercial_nom ne doit pas matcher CP/Ville")
+        if "contact commercial" in data.get("commercial_nom", "").lower():
+            failures.append("commercial_nom ne doit pas contenir 'Contact commercial'")
+        if data.get("client_cp") != "77100":
+            failures.append("client_cp attendu '77100'")
+        if failures:
+            warnings.append("SRX DEBUG TEST FAILED: " + "; ".join(failures))
 
     def _find_modele(self, lines):
         for line in lines:
@@ -534,6 +557,28 @@ class DevisParser:
             elif label.startswith("rampe"):
                 finitions["rampe"] = value
         return finitions
+
+    def _extract_remplissage(self, lines: list[str], warnings: list[str]) -> dict:
+        result = {"rampant": "", "etage": "", "soubassement": ""}
+        fallback_value = ""
+        for line in lines:
+            lowered = line.lower()
+            if "remplissage" not in lowered:
+                continue
+            match = re.search(r"remplissage[^:]*:\s*(.+)", line, re.IGNORECASE)
+            value = match.group(1).strip() if match else ""
+            if "rampant" in lowered:
+                result["rampant"] = value or result["rampant"]
+            elif "etage" in lowered or "étage" in lowered:
+                result["etage"] = value or result["etage"]
+            elif "soubassement" in lowered:
+                result["soubassement"] = value or result["soubassement"]
+            elif not fallback_value:
+                fallback_value = value
+        if fallback_value and not any(result.values()):
+            result["rampant"] = fallback_value
+            warnings.append("Remplissage sans précision: affecté au rampant par défaut.")
+        return result
 
     def _extract_essence(self, values: list[str]) -> str:
         for value in values:

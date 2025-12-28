@@ -81,6 +81,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(900, 600)
 
         self.devis_items = {}
+        self.settings = QtCore.QSettings("PDF-Auto", APP_NAME)
         self.parser = DevisParser(debug=bool(os.getenv("BDC_DEBUG")))
         self.pose_detector = PoseDetector()
         self.bdc_filler = BdcFiller(logger=self.log)
@@ -116,6 +117,16 @@ class MainWindow(QtWidgets.QMainWindow):
         info_label.setWordWrap(True)
         layout.addWidget(info_label)
 
+        depot_layout = QtWidgets.QHBoxLayout()
+        depot_label = QtWidgets.QLabel("Adresse dépôt (utilisée si pose vendue)")
+        depot_label.setMinimumWidth(250)
+        self.depot_text = QtWidgets.QPlainTextEdit()
+        self.depot_text.setPlaceholderText("Ex: Dépôt ...")
+        self.depot_text.setFixedHeight(80)
+        depot_layout.addWidget(depot_label)
+        depot_layout.addWidget(self.depot_text)
+        layout.addLayout(depot_layout)
+
         self.table = DropTable()
         self.table.files_dropped.connect(self.handle_files_dropped)
         self.table.itemChanged.connect(self.handle_item_changed)
@@ -136,6 +147,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.setCentralWidget(central)
         self.refresh_template_status(log_missing=True)
+        self._load_settings()
 
     def log(self, message):
         self.logs.append(message)
@@ -143,6 +155,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def log_to_file(self, message):
         append_log(self.log_file_path, message)
+
+    def _load_settings(self):
+        depot_value = self.settings.value("depot_adresse", "")
+        if depot_value:
+            self.depot_text.setPlainText(str(depot_value))
+
+    def _save_settings(self):
+        self.settings.setValue("depot_adresse", self.depot_text.toPlainText())
 
     def _resolve_base_dir(self) -> Path:
         if getattr(sys, "frozen", False):
@@ -389,6 +409,7 @@ class MainWindow(QtWidgets.QMainWindow):
             try:
                 output_name = self._build_output_name(item.data)
                 output_path = output_dir / output_name
+                item.data["depot_adresse"] = self.depot_text.toPlainText().strip()
                 self.bdc_filler.fill(self.template_path, item.data, output_path)
                 status_item.setText("OK")
                 self.log(f"BDC généré: {output_path}")
@@ -410,6 +431,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if len(base) > max_base:
             base = base[:max_base].rstrip()
         return f"{base}.pdf"
+
+    def closeEvent(self, event):
+        self._save_settings()
+        super().closeEvent(event)
 
 
 def main():

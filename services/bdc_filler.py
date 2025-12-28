@@ -1,5 +1,6 @@
-from pathlib import Path
 from datetime import date
+import re
+from pathlib import Path
 import logging
 import traceback
 from typing import Callable, Optional
@@ -40,6 +41,7 @@ TEXT_FIELDS = {
 CHECKBOX_FIELDS = {
     "bdc_chk_avec-contre-marches",
     "bdc_chk_avec-sans-marches",
+    "bdc_chk_autoliquidation",
     "bdc_chk_cremaillere",
     "bdc_chk_habillage_de_dalle_complet",
     "bdc_chk_habillage_de_dalle_corniere",
@@ -76,6 +78,7 @@ CRITICAL_FIELDS = {
     "bdc_devis_annee_mois",
     "bdc_devis_num",
 }
+BANNED_CLIENT_MARKERS = ("riaux", "vaugarny", "bazouges", "35560")
 
 
 class BdcFiller:
@@ -104,6 +107,7 @@ class BdcFiller:
 
             fields = self._build_fields(data)
             checkbox_states = self._build_checkbox_states(data)
+            self._validate_business_rules(fields)
 
             expected_fields = TEXT_FIELDS | CHECKBOX_FIELDS
             missing_critical = [
@@ -179,8 +183,8 @@ class BdcFiller:
             logging.getLogger(__name__).info(message)
 
     def _build_fields(self, data: dict):
-        pose_sold = bool(data.get("pose_sold"))
-        livraison_bloc = "" if pose_sold else "idem"
+        pose_sold = self._compute_pose_sold(data)
+        livraison_bloc = data.get("depot_adresse", "").strip() if pose_sold else "idem"
         client_adresse = self._build_client_adresse(data)
         return {
             "bdc_client_nom": data.get("client_nom", ""),
@@ -202,6 +206,15 @@ class BdcFiller:
             "bdc_esc_finition_contremarche": data.get("esc_finition_contremarche", ""),
             "bdc_esc_finition_rampe": data.get("esc_finition_rampe", ""),
             "bdc_esc_essence": data.get("esc_essence", ""),
+            "bdc_esc_section_remplissage_garde_corps_rampant": data.get(
+                "esc_section_remplissage_garde_corps_rampant", ""
+            ),
+            "bdc_esc_section_remplissage_garde_corps_etage": data.get(
+                "esc_section_remplissage_garde_corps_etage", ""
+            ),
+            "bdc_esc_remplissage_garde_corps_soubassement": data.get(
+                "esc_remplissage_garde_corps_soubassement", ""
+            ),
             "bdc_esc_main_courante": data.get("esc_main_courante", ""),
             "bdc_esc_main_courante_scellement": data.get(
                 "esc_main_courante_scellement", ""
@@ -212,11 +225,44 @@ class BdcFiller:
         }
 
     def _build_checkbox_states(self, data: dict):
-        pose_sold = bool(data.get("pose_sold"))
+        pose_sold = self._compute_pose_sold(data)
+        contremarche_value = (data.get("esc_finition_contremarche") or "").lower()
+        sans_contremarche = bool(
+            contremarche_value
+            and re.search(r"\b(sans|aucune|non)\b", contremarche_value, re.IGNORECASE)
+        )
+        contre_marche = bool(contremarche_value) and not sans_contremarche
+        structure_value = (data.get("esc_finition_structure") or "").lower()
+        structure_flags = {
+            "bdc_chk_cremaillere": False,
+            "bdc_chk_limon_centrale": False,
+            "bdc_chk_limon_decoupe": False,
+            "bdc_chk_limon": False,
+        }
+        if "crémaill" in structure_value or "cremaill" in structure_value:
+            structure_flags["bdc_chk_cremaillere"] = True
+        elif "limon central" in structure_value:
+            structure_flags["bdc_chk_limon_centrale"] = True
+        elif "découp" in structure_value or "decoup" in structure_value:
+            structure_flags["bdc_chk_limon_decoupe"] = True
+        elif "limon" in structure_value:
+            structure_flags["bdc_chk_limon"] = True
         return {
             "bdc_chk_livraison_client": not pose_sold,
             "bdc_chk_livraison_poseur": pose_sold,
+            "bdc_chk_autoliquidation": pose_sold
+            and bool(self._pose_amount(data))
+            and self._pose_amount(data) not in {"0,00", "0.00"},
+            "bdc_chk_avec-sans-marches": sans_contremarche,
+            "bdc_chk_avec-contre-marches": contre_marche,
+            **structure_flags,
         }
+
+    def _compute_pose_sold(self, data: dict) -> bool:
+        if data.get("pose_sold") is not None:
+            return bool(data.get("pose_sold"))
+        amount = self._pose_amount(data)
+        return bool(amount) and amount not in {"0,00", "0.00"}
 
     def _pose_amount(self, data: dict) -> str:
         if data.get("pose_sold"):
@@ -249,6 +295,24 @@ class BdcFiller:
             if name in CHECKBOX_FIELDS and name in bdc_fields:
                 values_to_set[name] = state
         return values_to_set
+
+    def _validate_business_rules(self, fields: dict) -> None:
+        errors = []
+        client_nom = (fields.get("bdc_client_nom") or "").strip()
+        devis_ref = (fields.get("bdc_devis_annee_mois") or "").strip()
+        fourniture_ht = (fields.get("bdc_montant_fourniture_ht") or "").strip()
+        if not client_nom:
+            errors.append("bdc_client_nom manquant")
+        if any(marker in client_nom.lower() for marker in BANNED_CLIENT_MARKERS):
+            errors.append(f"bdc_client_nom invalide: {client_nom!r}")
+        if "srx" not in devis_ref.lower():
+            errors.append("bdc_devis_annee_mois doit contenir 'SRX'")
+        if not fourniture_ht:
+            errors.append("bdc_montant_fourniture_ht manquant")
+        if errors:
+            message = "Validation BDC échouée: " + "; ".join(errors)
+            self._log(message)
+            raise ValueError(message)
 
     def _collect_field_names(self, reader: PdfReader) -> set[str]:
         names = set()
