@@ -2,6 +2,7 @@ import os
 import re
 import shutil
 import sys
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,6 +11,13 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from services.devis_parser import DevisParser
 from services.pose_detector import PoseDetector
 from services.bdc_filler import BdcFiller
+from services.validators import validate_bdc_data
+from utils.logging_util import append_log
+from utils.paths import (
+    get_log_file_path,
+    get_template_path,
+    get_user_templates_dir,
+)
 
 APP_NAME = "BDC Generator"
 
@@ -74,9 +82,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pose_detector = PoseDetector()
         self.bdc_filler = BdcFiller()
         self.base_dir = self._resolve_base_dir()
-        self.templates_dir = self.base_dir / "Templates"
-        self.template_path = self.templates_dir / "bon de commande V1.pdf"
+        self.templates_dir = get_user_templates_dir(APP_NAME)
+        self.template_path = get_template_path(APP_NAME)
+        self.bundled_template_path = self.base_dir / "Templates" / "bon de commande V1.pdf"
+        self.log_file_path = get_log_file_path(APP_NAME)
         self._loading_table = False
+        self.settings = QtCore.QSettings(APP_NAME, "settings")
 
         central = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(central)
@@ -85,12 +96,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.template_status = QtWidgets.QLabel()
         self.open_templates_button = QtWidgets.QPushButton("Ouvrir le dossier Templates")
         self.choose_template_button = QtWidgets.QPushButton("Choisir un template…")
+        self.open_log_button = QtWidgets.QPushButton("Ouvrir le log")
         self.open_templates_button.clicked.connect(self.open_templates_folder)
         self.choose_template_button.clicked.connect(self.choose_template_file)
+        self.open_log_button.clicked.connect(self.open_log_file)
         template_layout.addWidget(self.template_status)
         template_layout.addStretch()
         template_layout.addWidget(self.open_templates_button)
         template_layout.addWidget(self.choose_template_button)
+        template_layout.addWidget(self.open_log_button)
         layout.addLayout(template_layout)
 
         info_label = QtWidgets.QLabel(
@@ -99,6 +113,17 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         info_label.setWordWrap(True)
         layout.addWidget(info_label)
+
+        depot_layout = QtWidgets.QVBoxLayout()
+        depot_label = QtWidgets.QLabel("Adresse dépôt (utilisée si la pose est vendue) :")
+        self.depot_input = QtWidgets.QPlainTextEdit()
+        self.depot_input.setPlaceholderText(
+            "Exemple : 5 rue du Dépôt, 75000 Paris\nUtilisé pour remplir le bloc livraison quand la pose est vendue."
+        )
+        self.depot_input.setFixedHeight(70)
+        depot_layout.addWidget(depot_label)
+        depot_layout.addWidget(self.depot_input)
+        layout.addLayout(depot_layout)
 
         self.table = DropTable()
         self.table.files_dropped.connect(self.handle_files_dropped)
@@ -119,10 +144,15 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(self.logs)
 
         self.setCentralWidget(central)
+        self._load_settings()
         self.refresh_template_status(log_missing=True)
 
     def log(self, message):
         self.logs.append(message)
+        append_log(self.log_file_path, message)
+
+    def log_to_file(self, message):
+        append_log(self.log_file_path, message)
 
     def _resolve_base_dir(self) -> Path:
         if getattr(sys, "frozen", False):
@@ -130,9 +160,18 @@ class MainWindow(QtWidgets.QMainWindow):
         return Path(__file__).resolve().parent
 
     def _template_status_text(self, exists: bool) -> str:
-        return "Template: OK" if exists else "Template: MANQUANT"
+        if exists:
+            return "Template: OK"
+        return "Template: MANQUANT (utilisez 'Choisir un template…')"
 
     def refresh_template_status(self, log_missing: bool = False):
+        self.templates_dir.mkdir(parents=True, exist_ok=True)
+        if not self.template_path.exists() and self.bundled_template_path.exists():
+            try:
+                shutil.copy2(self.bundled_template_path, self.template_path)
+                self.log(f"Template copié depuis l'application: {self.template_path}")
+            except Exception as exc:  # pylint: disable=broad-except
+                self.log(f"Erreur copie template embarqué: {exc}")
         exists = self.template_path.exists()
         self.template_status.setText(self._template_status_text(exists))
         color = "#1b8f1b" if exists else "#b00020"
@@ -140,7 +179,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.generate_button.setEnabled(exists)
         if not exists and log_missing:
             self.log(
-                "Template manquant: placez 'Templates/bon de commande V1.pdf' ou utilisez 'Choisir un template…'."
+                "Template manquant: placez 'bon de commande V1.pdf' dans le dossier Templates utilisateur "
+                "ou utilisez 'Choisir un template…'."
             )
 
     def open_templates_folder(self):
@@ -151,6 +191,23 @@ class MainWindow(QtWidgets.QMainWindow):
         if not opened:
             self.log("Impossible d'ouvrir le dossier Templates.")
 
+    def open_log_file(self):
+        self.log_file_path.parent.mkdir(parents=True, exist_ok=True)
+        if not self.log_file_path.exists():
+            self.log_file_path.touch()
+        opened = QtGui.QDesktopServices.openUrl(
+            QtCore.QUrl.fromLocalFile(str(self.log_file_path))
+        )
+        if not opened:
+            self.log("Impossible d'ouvrir le fichier log.")
+
+    def _load_settings(self):
+        depot_value = self.settings.value("depot_adresse", "", type=str) or ""
+        self.depot_input.setPlainText(depot_value)
+
+    def _save_settings(self):
+        self.settings.setValue("depot_adresse", self.depot_input.toPlainText())
+
     def choose_template_file(self):
         file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
@@ -160,15 +217,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if not file_path:
             return
-        source = Path(file_path)
-        self.templates_dir.mkdir(parents=True, exist_ok=True)
-        target = self.template_path
-        try:
-            shutil.copy2(source, target)
-            self.log(f"Template copié: {target}")
-            self.refresh_template_status()
-        except Exception as exc:  # pylint: disable=broad-except
-            self.log(f"Erreur copie template: {exc}")
+        self.install_template(Path(file_path))
 
     def _is_template_file(self, path: Path) -> bool:
         normalized = re.sub(r"[\s_-]+", "", path.name.lower())
@@ -180,7 +229,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def handle_files_dropped(self, paths):
         for path in paths:
             if self._is_template_file(path):
-                self.log(f"Template détecté, ignoré: {path.name}")
+                self.install_template(path)
                 continue
             if not self._is_srx_pdf(path):
                 self.log(f"Fichier ignoré (attendu SRX*.pdf): {path.name}")
@@ -211,6 +260,15 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.log(f"[debug] {path.name}: {entry}")
             except Exception as exc:  # pylint: disable=broad-except
                 self.log(f"Erreur lecture {path.name}: {exc}")
+
+    def install_template(self, source: Path):
+        self.templates_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(source, self.template_path)
+            self.log(f"Template copié: {self.template_path}")
+            self.refresh_template_status()
+        except Exception as exc:  # pylint: disable=broad-except
+            self.log(f"Erreur copie template: {exc}")
 
     def add_row(self, path, pose_sold, pose_status):
         row = self.table.rowCount()
@@ -262,7 +320,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.devis_items = {}
         self.log("Liste vidée.")
 
+    def closeEvent(self, event):  # noqa: N802
+        self._save_settings()
+        super().closeEvent(event)
+
     def generate_bdcs(self):
+        self._save_settings()
         if not self.template_path.exists():
             self.refresh_template_status(log_missing=True)
             return
@@ -282,15 +345,26 @@ class MainWindow(QtWidgets.QMainWindow):
             pose_sold = pose_item.checkState() == QtCore.Qt.Checked
             item.pose_sold = pose_sold
             item.data["pose_sold"] = pose_sold
+            is_valid, validation_message = validate_bdc_data(item.data)
+            if not is_valid:
+                status_item.setText(f"Erreur: {validation_message}")
+                self.log(f"{path.name}: {validation_message}")
+                continue
             try:
                 output_name = self._build_output_name(item.data)
                 output_path = output_dir / output_name
-                self.bdc_filler.fill(self.template_path, item.data, output_path)
-                status_item.setText(f"OK -> {output_path}")
+                self.bdc_filler.fill(
+                    self.template_path, item.data, output_path, self.depot_input.toPlainText().strip()
+                )
+                status_item.setText("OK")
                 self.log(f"BDC généré: {output_path}")
             except Exception as exc:  # pylint: disable=broad-except
-                status_item.setText("Erreur")
-                self.log(f"Erreur génération {path.name}: {exc}")
+                short_message = str(exc).strip() or exc.__class__.__name__
+                status_item.setText(f"Erreur: {short_message}")
+                self.log(
+                    f"Erreur génération {path.name}: {exc.__class__.__name__}: {short_message}"
+                )
+                self.log_to_file(traceback.format_exc())
 
     def _build_output_name(self, data: dict) -> str:
         client_nom = data.get("client_nom", "").strip() or "CLIENT"
@@ -307,6 +381,7 @@ class MainWindow(QtWidgets.QMainWindow):
 def main():
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
     app = QtWidgets.QApplication(sys.argv)
+    app.setApplicationName(APP_NAME)
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
