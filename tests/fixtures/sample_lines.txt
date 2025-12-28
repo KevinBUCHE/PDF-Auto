@@ -1,0 +1,21 @@
+DEVIS N° SRX2401AFF123
+Réf affaire Escalier Demo
+Code client :
+CLIENT DEMO
+12 rue des Fleurs
+75000 Paris
+Tel : 01 02 03 04 05
+Contact commercial
+John Doe
+FINITIONS
+-Modèle : Urban
+-Structure : Limon central acier
+-Marche : Chêne - Vernis mat
+-Contremarche : Sans
+-Main courante : Hêtre - Brut
+Remplissage rampant : Barreaudage acier
+Remplissage étage : Vitrage feuilleté
+PRIX DE LA FOURNITURE HT 12 345,67
+PRIX PRESTATIONS ET SERVICES HT 2 345,00
+TOTAL HORS TAXE 14 690,67
+Validité ...

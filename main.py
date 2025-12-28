@@ -10,17 +10,13 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from services.rule_based_parser import RuleBasedParser
 from services.bdc_filler import BdcFiller
-from services.data_normalizer import normalize_extracted_data
-from services.gemini_extractor import DEFAULT_GEMINI_MODEL, GeminiExtractor
-from services.address_sanitizer import has_riaux_pollution
-from services.validator import validate_and_fix
+from services.validators import validate_bdc_data
 from utils.logging_util import append_log
 from utils.paths import (
     get_log_file_path,
     get_template_path,
     get_user_templates_dir,
 )
-from utils.settings_service import SettingsService
 
 APP_NAME = "BDC Generator"
 
@@ -92,13 +88,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.template_path = get_template_path(APP_NAME)
         self.bundled_template_path = self.base_dir / "Templates" / "bon de commande V1.pdf"
         self.log_file_path = get_log_file_path(APP_NAME)
-        self.settings_service = SettingsService(APP_NAME)
-        self.settings = self.settings_service.load()
-        self.gemini_api_key = self.settings.get("gemini_api_key", "")
-        self.gemini_model = self.settings.get("gemini_model", DEFAULT_GEMINI_MODEL)
-        self.gemini_enabled = bool(self.settings.get("gemini_enabled"))
-        self.gemini_extractor: GeminiExtractor | None = None
         self._loading_table = False
+        self.settings = QtCore.QSettings(APP_NAME, "settings")
 
         central = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(central)
@@ -108,19 +99,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.open_templates_button = QtWidgets.QPushButton("Ouvrir le dossier Templates")
         self.choose_template_button = QtWidgets.QPushButton("Choisir un template…")
         self.open_log_button = QtWidgets.QPushButton("Ouvrir le log")
-        self.gemini_settings_button = QtWidgets.QPushButton("Paramètres Gemini")
-        self.gemini_toggle = QtWidgets.QLabel()
         self.open_templates_button.clicked.connect(self.open_templates_folder)
         self.choose_template_button.clicked.connect(self.choose_template_file)
         self.open_log_button.clicked.connect(self.open_log_file)
-        self.gemini_settings_button.clicked.connect(self.open_gemini_settings)
         template_layout.addWidget(self.template_status)
         template_layout.addStretch()
         template_layout.addWidget(self.open_templates_button)
         template_layout.addWidget(self.choose_template_button)
         template_layout.addWidget(self.open_log_button)
-        template_layout.addWidget(self.gemini_settings_button)
-        template_layout.addWidget(self.gemini_toggle)
         layout.addLayout(template_layout)
 
         info_label = QtWidgets.QLabel(
@@ -129,6 +115,17 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         info_label.setWordWrap(True)
         layout.addWidget(info_label)
+
+        depot_layout = QtWidgets.QVBoxLayout()
+        depot_label = QtWidgets.QLabel("Adresse dépôt (utilisée si la pose est vendue) :")
+        self.depot_input = QtWidgets.QPlainTextEdit()
+        self.depot_input.setPlaceholderText(
+            "Exemple : 5 rue du Dépôt, 75000 Paris\nUtilisé pour remplir le bloc livraison quand la pose est vendue."
+        )
+        self.depot_input.setFixedHeight(70)
+        depot_layout.addWidget(depot_label)
+        depot_layout.addWidget(self.depot_input)
+        layout.addLayout(depot_layout)
 
         self.table = DropTable()
         self.table.files_dropped.connect(self.handle_files_dropped)
@@ -152,6 +149,7 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addWidget(self.logs)
 
         self.setCentralWidget(central)
+        self._load_settings()
         self.refresh_template_status(log_missing=True)
 
     def log(self, message):
@@ -208,21 +206,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if not opened:
             self.log("Impossible d'ouvrir le fichier log.")
 
-    def export_debug(self):
-        row = self.table.currentRow()
-        if row < 0:
-            self.log("Sélectionnez un devis pour exporter le debug.")
-            return
-        file_item = self.table.item(row, 0)
-        if not file_item:
-            self.log("Impossible de trouver le devis sélectionné.")
-            return
-        path = Path(file_item.text())
-        exported_path = self.parser.export_debug(path)
-        if not exported_path:
-            self.log(f"Aucune donnée debug disponible pour {path.name}.")
-            return
-        self.log(f"Debug exporté: {exported_path}")
+    def _load_settings(self):
+        depot_value = self.settings.value("depot_adresse", "", type=str) or ""
+        self.depot_input.setPlainText(depot_value)
+
+    def _save_settings(self):
+        self.settings.setValue("depot_adresse", self.depot_input.toPlainText())
 
     def choose_template_file(self):
         file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -471,7 +460,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.devis_items = {}
         self.log("Liste vidée.")
 
+    def closeEvent(self, event):  # noqa: N802
+        self._save_settings()
+        super().closeEvent(event)
+
     def generate_bdcs(self):
+        self._save_settings()
         if not self.template_path.exists():
             self.refresh_template_status(log_missing=True)
             return
@@ -491,11 +485,17 @@ class MainWindow(QtWidgets.QMainWindow):
             pose_sold = pose_item.checkState() == QtCore.Qt.Checked
             item.pose_sold = pose_sold
             item.data["pose_sold"] = pose_sold
+            is_valid, validation_message = validate_bdc_data(item.data)
+            if not is_valid:
+                status_item.setText(f"Erreur: {validation_message}")
+                self.log(f"{path.name}: {validation_message}")
+                continue
             try:
                 output_name = self._build_output_name(item.data)
                 output_path = output_dir / output_name
-                cleaned_data = normalize_extracted_data(item.data)
-                self.bdc_filler.fill(self.template_path, cleaned_data, output_path)
+                self.bdc_filler.fill(
+                    self.template_path, item.data, output_path, self.depot_input.toPlainText().strip()
+                )
                 status_item.setText("OK")
                 self.log(f"BDC généré: {output_path}")
             except Exception as exc:  # pylint: disable=broad-except

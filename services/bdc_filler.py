@@ -1,8 +1,5 @@
-from pathlib import Path
 from datetime import date
-import logging
-import traceback
-from typing import Callable, Optional
+from pathlib import Path
 
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import BooleanObject, IndirectObject, NameObject, TextStringObject
@@ -82,50 +79,13 @@ CRITICAL_FIELDS = {
 
 
 class BdcFiller:
-    def __init__(self, logger: Optional[Callable[[str], None]] = None):
-        self._logger = logger
-
-    def fill(self, template_path: Path, data: dict, output_path: Path):
-        try:
-            if not template_path.exists():
-                raise FileNotFoundError(template_path)
-            reader = PdfReader(str(template_path))
-            writer = PdfWriter()
-            writer.clone_document_from_reader(reader)
-            root = writer._root_object
-            acro = root.get("/AcroForm")
-            if isinstance(acro, IndirectObject):
-                acro = acro.get_object()
-            if acro is None:
-                raise ValueError("AcroForm absent")
-            acro.update({NameObject("/NeedAppearances"): BooleanObject(True)})
-            self._log(f"Template utilisé: {template_path}")
-            field_names = self._collect_field_names(reader)
-            bdc_fields = {name for name in field_names if str(name).startswith("bdc_")}
-            self._log(f"Champs bdc_* détectés: {len(bdc_fields)}")
-            if self._logger:
-                self._log(f"Liste champs bdc_*: {sorted(bdc_fields)}")
-
-            fields = self._build_fields(data)
-            checkbox_states = self._build_checkbox_states(data)
-
-            expected_fields = TEXT_FIELDS | CHECKBOX_FIELDS
-            missing_critical = [
-                name for name in CRITICAL_FIELDS if name not in bdc_fields
-            ]
-            for name in sorted(expected_fields):
-                if name not in bdc_fields:
-                    self._log(f"Champ bdc_* introuvable: {name}")
-            if missing_critical:
-                raise ValueError(
-                    "Champs critiques manquants dans le template: "
-                    f"{', '.join(missing_critical)}"
-                )
-
-            values_to_set = self._build_values_to_set(
-                fields, checkbox_states, bdc_fields
-            )
-            self._log(f"values_to_set={values_to_set}")
+    def fill(self, template_path: Path, data: dict, output_path: Path, depot_adresse: str = ""):
+        if not template_path.exists():
+            raise FileNotFoundError(template_path)
+        reader = PdfReader(str(template_path))
+        writer = PdfWriter()
+        for page in reader.pages:
+            writer.add_page(page)
 
             text_values = {
                 key: value
@@ -192,19 +152,19 @@ class BdcFiller:
             "bdc_commercial_nom": data.get("commercial_nom", ""),
             "bdc_date_commande": date.today().strftime("%d/%m/%Y"),
             "bdc_ref_affaire": data.get("ref_affaire", ""),
-            "bdc_devis_annee_mois": data.get("devis_annee_mois", ""),
-            "bdc_devis_num": data.get("devis_num", ""),
+            "bdc_client_nom": data.get("client_nom", ""),
+            "bdc_client_adresse": data.get("client_adresse", ""),
+            "bdc_commercial_nom": data.get("commercial_nom") or "BUCHE Kevin",
+            "bdc_livraison_bloc": self._delivery_block(data, depot_adresse),
+            "bdc_montant_pose_ht": self._pose_amount(data),
             "bdc_montant_fourniture_ht": data.get("fourniture_ht", ""),
             "bdc_montant_pose_ht": self._pose_amount(data),
             "bdc_livraison_bloc": livraison_bloc,
             "bdc_esc_gamme": data.get("esc_gamme", ""),
             "bdc_esc_finition_marches": data.get("esc_finition_marches", ""),
-            "bdc_esc_finition_structure": data.get("esc_finition_structure", ""),
-            "bdc_esc_finition_mains_courante": data.get(
-                "esc_finition_mains_courante", ""
-            ),
             "bdc_esc_finition_contremarche": data.get("esc_finition_contremarche", ""),
-            "bdc_esc_finition_rampe": data.get("esc_finition_rampe", ""),
+            "bdc_esc_finition_structure": data.get("esc_finition_structure", ""),
+            "bdc_esc_finition_mains_courante": data.get("esc_finition_mains_courante", ""),
             "bdc_esc_essence": data.get("esc_essence", ""),
             "bdc_esc_main_courante": data.get("esc_main_courante", ""),
             "bdc_esc_main_courante_scellement": data.get(
@@ -213,19 +173,44 @@ class BdcFiller:
             "bdc_esc_nez_de_marches": data.get("esc_nez_de_marches", ""),
             "bdc_esc_tete_de_poteau": data.get("esc_tete_de_poteau", ""),
             "bdc_esc_poteaux_depart": data.get("esc_poteaux_depart", ""),
+            "bdc_esc_section_remplissage_garde_corps_rampant": data.get(
+                "remplissage_rampant", ""
+            ),
+            "bdc_esc_section_remplissage_garde_corps_etage": data.get(
+                "remplissage_etage", ""
+            ),
+            "bdc_esc_remplissage_garde_corps_soubassement": data.get(
+                "remplissage_soubassement", ""
+            ),
         }
 
-    def _build_checkbox_states(self, data: dict):
-        pose_sold = bool(data.get("pose_sold"))
-        return {
-            "bdc_chk_livraison_client": not pose_sold,
-            "bdc_chk_livraison_poseur": pose_sold,
+        checkbox_states = {
+            "bdc_chk_livraison_client": not data.get("pose_sold"),
+            "bdc_chk_livraison_poseur": bool(data.get("pose_sold")),
+            "bdc_chk_autoliquidation": self._autoliquidation_state(data),
+            "bdc_chk_avec-sans-marches": bool(data.get("contremarche_sans")),
+            "bdc_chk_avec-contre-marches": bool(data.get("contremarche_avec")),
+            "bdc_chk_cremaillere": data.get("structure_type") == "cremaillere",
+            "bdc_chk_limon_centrale": data.get("structure_type") == "limon_central",
+            "bdc_chk_limon_decoupe": data.get("structure_type") == "limon_decoupe",
+            "bdc_chk_limon": data.get("structure_type") == "limon",
         }
 
     def _pose_amount(self, data: dict) -> str:
         if data.get("pose_sold"):
             return data.get("pose_amount") or data.get("prestations_ht", "")
-        return data.get("prestations_ht", "")
+        return ""
+
+    def _autoliquidation_state(self, data: dict) -> bool:
+        amount = self._pose_amount(data)
+        if not amount or amount == "0,00":
+            return False
+        return True
+
+    def _delivery_block(self, data: dict, depot_adresse: str) -> str:
+        if data.get("pose_sold"):
+            return depot_adresse
+        return "idem"
 
     def _build_client_adresse(self, data: dict) -> str:
         clean_data = sanitize_client_address(data)
