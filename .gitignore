@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.spec
+venv/
+.env
+dist/
+build/
+*.exe
+*.dll
+*.pdf
+*.zip
+*.log
+.DS_Store
+.idea/
+.vscode/

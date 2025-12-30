@@ -1,73 +1,43 @@
-import re
-from typing import Tuple, List
+from __future__ import annotations
 
-from services.address_sanitizer import sanitize_client_address
+from dataclasses import asdict
+from typing import Iterable
 
-RIAUX_TOKENS = [
-    "VAUGARNY",
-    "35560",
-    "BAZOUGES",
-    "BAZOUGES LA PEROUSE",
-    "GROUPE RIAUX",
-    "RIAUX",
-    "1623Z",
-    "RCS RENNES",
-    "02 99 97 45 40",
-    "@GROUPE-RIAUX.FR",
-]
+from .devis_parser import ParsedDevis
+from .rules import INTERNAL_ADDRESSES
 
 
-def _contains_riaux(value: str) -> bool:
-    upper = value.upper()
-    return any(token in upper for token in RIAUX_TOKENS)
+class ValidationError(Exception):
+    """Raised when the parsed devis data is invalid."""
 
 
-def _clean_cp(cp: str) -> str:
-    cp = (cp or "").strip()
-    return cp if re.fullmatch(r"\d{5}", cp) else ""
+def _contains_internal_address(value: str) -> bool:
+    upper_value = value.upper()
+    return any(addr.upper() in upper_value for addr in INTERNAL_ADDRESSES)
 
 
-def _clean_amount(value: str) -> str:
-    value = (value or "").replace("\u202f", " ").strip()
-    if not re.search(r"\d[\d\s]*[.,]\d{2}", value):
-        return ""
-    value = value.replace(".", ",")
-    value = re.sub(r"\s+", " ", value).strip()
-    return value
+def validate_parsed_devis(parsed: ParsedDevis) -> ParsedDevis:
+    """Validate parsed data and enforce anti-RIAUX rules."""
+    if _contains_internal_address(parsed.bdc_client_adresse) or _contains_internal_address(parsed.bdc_client_ville):
+        raise ValidationError("Adresse interne détectée: refus de générer.")
+
+    if parsed.bdc_client_cp and parsed.bdc_client_ville:
+        cp_city = f"{parsed.bdc_client_cp} {parsed.bdc_client_ville}"
+        if _contains_internal_address(cp_city):
+            raise ValidationError("Adresse interne détectée: refus de générer.")
+
+    mandatory = {
+        "bdc_client_nom": parsed.bdc_client_nom,
+        "bdc_ref_affaire": parsed.bdc_ref_affaire,
+        "bdc_devis_annee_mois": parsed.bdc_devis_annee_mois,
+    }
+    missing = [key for key, value in mandatory.items() if not value]
+    if missing:
+        raise ValidationError(f"Champs obligatoires manquants: {', '.join(missing)}")
+
+    return parsed
 
 
-def validate_and_fix(data: dict) -> Tuple[dict, List[str]]:
-    fixed = dict(data)
-    warnings: List[str] = []
-
-    fixed = sanitize_client_address(fixed)
-
-    if _contains_riaux(fixed.get("client_nom", "")):
-        fixed["client_nom"] = ""
-        warnings.append("Client contient une pollution RIAUX")
-    for key in ("client_adresse1", "client_adresse2", "client_ville", "client_cp"):
-        if _contains_riaux(fixed.get(key, "")):
-            fixed[key] = ""
-            warnings.append(f"{key} contient une pollution RIAUX")
-
-    fixed["client_cp"] = _clean_cp(fixed.get("client_cp", ""))
-    if fixed["client_cp"] == "":
-        fixed["client_ville"] = fixed.get("client_ville", "")
-
-    for key in ("fourniture_ht", "prestations_ht", "total_ht", "pose_amount"):
-        cleaned = _clean_amount(fixed.get(key, ""))
-        if fixed.get(key) and not cleaned:
-            warnings.append(f"Montant invalide pour {key}")
-        fixed[key] = cleaned
-
-    if fixed.get("ref_affaire", "").lower().startswith("réf affaire"):
-        fixed["ref_affaire"] = fixed["ref_affaire"].split(":", 1)[-1].strip()
-
-    email_regex = re.compile(r"^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$", re.IGNORECASE)
-    for key in ("client_email", "commercial_email"):
-        email = fixed.get(key, "")
-        if email and not email_regex.fullmatch(email):
-            fixed[key] = ""
-            warnings.append(f"Email invalide pour {key}")
-
-    return fixed, warnings
+def to_dict(parsed: ParsedDevis) -> dict:
+    """Helper to convert ParsedDevis into a plain dictionary for filling."""
+    return asdict(parsed)
