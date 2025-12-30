@@ -11,15 +11,21 @@ Generates a filled "bon de commande" PDF from SRX quote PDFs using deterministic
 From a Python environment with dependencies installed:
 
 ```bash
-python main.py --input "fixtures/SRX2512AFF040301/SRX2512AFF040301.pdf" --pose auto --outdir "./BDC_Output"
+python main.py \
+  --input "fixtures/SRX2512AFF040301/SRX2512AFF040301.pdf" \
+  --template "Templates/bon de commande V1.pdf" \
+  --output "BDC_Output/CDE Test.pdf" \
+  --pose auto
 ```
 
 Arguments:
 - `--input`: Path to an SRX*.pdf quote.
-- `--pose`: `yes`, `no`, or `auto` (default) to force or infer whether installation/pose is sold.
-- `--outdir`: Output directory (defaults to `BDC_Output` or the value in `config.json`).
+- `--template`: Path to the BDC template PDF (default `Templates/bon de commande V1.pdf`).
+- `--output`: Destination PDF path (JSON debug is written alongside).
+- `--pose`: `oui`, `non`, or `auto` (default) to force or infer whether installation/pose is sold.
+- `--outdir`: Default base output directory if `--output` is relative (defaults to `BDC_Output` or the value in `config.json`).
 
-The command produces a filled PDF named `CDE <client_nom> Ref <ref_affaire>.pdf` and a JSON extraction file alongside it.
+The command produces the filled PDF and a JSON extraction file alongside it.
 
 ## Development
 - Run the parser tests:

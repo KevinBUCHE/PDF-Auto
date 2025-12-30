@@ -115,22 +115,31 @@ class DevisParser:
 
     def _parse_client_block(self) -> None:
         anchor_index = self._find_line_index("code client")
+        contact_index = self._find_line_index("contact commercial") or len(self.lines)
+
         if anchor_index is None:
             self.warnings.append("Ligne 'Code client' absente")
+            start = max(0, contact_index - 8)
+            self._parse_client_block_fallback(start, contact_index)
             return
 
-        self.result.data.client_nom = self._find_client_name(anchor_index)
-
+        name_found = False
         address_lines: List[str] = []
-        for raw_line in self.lines[anchor_index + 1 :]:
-            normalized = sanitize.normalize_line(raw_line)
-            low = sanitize.normalize_for_match(normalized)
-            if low.startswith("contact commercial"):
-                break
-            if self.result.data.client_nom and sanitize.normalize_for_match(normalized) == sanitize.normalize_for_match(
-                self.result.data.client_nom
-            ):
+
+        for idx in range(anchor_index + 1, contact_index):
+            normalized = sanitize.normalize_line(self.lines[idx])
+            if not normalized:
                 continue
+            if sanitize.is_riaux_line(normalized):
+                if not self.result.data.client_contact and self._is_contact_line(normalized):
+                    self.result.data.client_contact = normalized
+                continue
+            if not name_found:
+                self.result.data.client_nom = normalized
+                name_found = True
+                continue
+
+            low = sanitize.normalize_for_match(normalized)
             if low.startswith("tel") or low.startswith("te l") or low.startswith("fax") or low.startswith("tl"):
                 numbers = sanitize.extract_phone_numbers(normalized)
                 for number in numbers:
@@ -139,19 +148,17 @@ class DevisParser:
                             [self.result.data.client_tel, number]
                         )
                 break
-            if sanitize.is_riaux_line(normalized):
-                if not self.result.data.client_contact and self._is_contact_line(normalized):
-                    self.result.data.client_contact = normalized
-                continue
+
             address_lines.append(normalized)
+
+        if not self.result.data.client_nom:
+            self.result.data.client_nom = self._find_client_name(anchor_index)
 
         self._fill_address_fields(address_lines)
 
         if not self.result.data.client_cp:
-            for raw_line in self.lines[anchor_index + 1 :]:
+            for raw_line in self.lines[anchor_index + 1 : contact_index]:
                 normalized = sanitize.normalize_line(raw_line)
-                if sanitize.normalize_for_match(normalized).startswith("contact commercial"):
-                    break
                 if sanitize.is_riaux_line(normalized):
                     continue
                 match_cp = rules.POSTAL_CODE_PATTERN.search(normalized)
@@ -160,6 +167,15 @@ class DevisParser:
                     after_cp = sanitize.normalize_line(normalized[match_cp.end() :]).strip()
                     self.result.data.client_ville = after_cp.upper() if after_cp else ""
                     break
+
+    def _parse_client_block_fallback(self, start: int, end: int) -> None:
+        lines = [sanitize.normalize_line(line) for line in self.lines[start:end]]
+        filtered = [line for line in lines if line and not sanitize.is_riaux_line(line)]
+        if not filtered:
+            return
+        self.result.data.client_nom = filtered[0]
+        address_lines = filtered[1:]
+        self._fill_address_fields(address_lines)
 
     def _find_client_name(self, anchor_index: int) -> str:
         for offset in range(anchor_index - 1, -1, -1):

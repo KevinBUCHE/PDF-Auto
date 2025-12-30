@@ -59,8 +59,11 @@ class BdcFiller:
             "bdc_client_email": parsed.data.client_email,
         }
 
-        if parsed.data.pose_sold and "bdc_adresse_depot_pose" in field_names:
-            text_updates["bdc_adresse_depot_pose"] = config.get("adresse_depot_pose", "")
+        adresse_depot_key = "bdc_adresse_depot_pose"
+        if parsed.data.pose_sold and adresse_depot_key in field_names:
+            text_updates[adresse_depot_key] = config.get("adresse_depot_pose", "")
+        elif adresse_depot_key in field_names:
+            text_updates[adresse_depot_key] = ""
 
         self._update_text_fields(writer, text_updates)
 
@@ -193,7 +196,7 @@ class BdcFiller:
     def _validate_output(self, pdf_path: Path) -> None:
         reader = PdfReader(str(pdf_path))
         fields = self._read_field_values(reader)
-        required = ["bdc_client_nom", "bdc_devis_annee_mois", "bdc_ref_affaire"]
+        required = ["bdc_client_nom", "bdc_devis_annee_mois", "bdc_ref_affaire", "bdc_montant_fourniture_ht"]
         missing = [name for name in required if not fields.get(name)]
         if missing:
             raise ValueError(f"Champs obligatoires manquants: {', '.join(missing)}")
